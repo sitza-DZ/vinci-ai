@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner/banner.jpg" alt="AI Shorts Generator" width="100%">
+  <img src="assets/screenshot.png" alt="Vinci AI app screenshot" width="100%">
 </p>
 
 # 🎬 Vinci AI — AI Shorts Generator
@@ -9,10 +9,6 @@ AI-powered YouTube Shorts / Reels video factory. Give it a **topic** — it writ
 Includes **Autopilot Mode**: a hands-free factory that keeps generating and uploading videos on a schedule.
 
 > Runs on **Termux (Android)**, **Windows**, or any Linux box · Protected by **PIN login** · Exposed publicly via **Cloudflare Tunnel**
-
-<p align="center">
-  <img src="assets/screenshot.png" alt="Vinci AI app screenshot" width="100%">
-</p>
 
 ---
 
