@@ -120,7 +120,7 @@ pip install edge-tts
 **5. Get the project running:**
 
 ```powershell
-git clone https://github.com/YOUR-USERNAME/ai-shorts-generator.git
+git clone https://github.com/sitza-DZ/vinci-ai.git
 cd ai-shorts-generator
 
 npm install
@@ -144,7 +144,7 @@ npm start
 
 ```bash
 # 1. Get the project
-git clone https://github.com/YOUR-USERNAME/ai-shorts-generator.git
+git clone https://github.com/sitza-DZ/vinci-ai.git
 cd ai-shorts-generator
 
 # 2. Install dependencies
