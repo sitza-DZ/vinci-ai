@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { motion } from "motion/react";
 import {
   ArrowLeft,
@@ -23,7 +24,12 @@ import {
   Loader2,
   ClipboardCheck,
   Type,
-  Image
+  Image,
+  Undo2,
+  Redo2,
+  ArrowUp,
+  ArrowDown,
+  Wand2
 } from "lucide-react";
 import {
   Project,
@@ -33,7 +39,8 @@ import {
   TransitionType,
   ProjectStatus,
   StockClip,
-  AudioLibraryTrack
+  AudioLibraryTrack,
+  UserSettings
 } from "../types";
 
 interface ProjectDetailsViewProps {
@@ -81,18 +88,15 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
     }
   }, [isPlaying, isFullScreenPlaying, activeSceneIndex]);
 
-  // Handle synchronization of states when entering/exiting fullscreen preview overlay
+  // Handle synchronization of states when entering/exiting fullscreen preview overlay.
+  // NOTE: playing / muted / mode are set EXPLICITLY by the entry-point buttons.
+  // This effect only pauses the background storyboard player on open, and mirrors
+  // fullscreen state back to the main player on close. It must NOT overwrite
+  // isFullScreenPlaying on open, otherwise "Watch Fullscreen Playback" auto-play breaks.
   useEffect(() => {
     if (isFullScreenOpen) {
       if (videoRef.current) {
         videoRef.current.pause();
-      }
-      setIsFullScreenPlaying(isPlaying);
-      setIsFullScreenMuted(isMuted);
-      if (project?.status === ProjectStatus.COMPLETED) {
-        setFullScreenMode("rendered");
-      } else {
-        setFullScreenMode("storyboard");
       }
     } else {
       setIsPlaying(isFullScreenPlaying);
@@ -104,6 +108,90 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
   const [editingSceneId, setEditingSceneId] = useState<string | null>(null);
   const [sceneEditText, setSceneEditText] = useState("");
   const [sceneEditHook, setSceneEditHook] = useState("");
+
+  // === Undo/Redo history stack (storyboard edits: text, clips, reorder, trim, settings) ===
+  const historyRef = useRef<{ scenes: Scene[]; settings: UserSettings | null }[]>([]);
+  const historyIndexRef = useRef(-1);
+  const historyLockRef = useRef(false);
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+
+  const pushHistory = () => {
+    try {
+      historyRef.current = historyRef.current.slice(0, historyIndexRef.current + 1);
+      historyRef.current.push({
+        scenes: JSON.parse(JSON.stringify(scenes)),
+        settings: project ? JSON.parse(JSON.stringify(project.settings)) : null
+      });
+      if (historyRef.current.length > 50) historyRef.current.shift();
+      historyIndexRef.current = historyRef.current.length - 1;
+      setCanUndo(historyIndexRef.current > 0);
+      setCanRedo(false);
+    } catch { /* noop */ }
+  };
+
+  const handleUndo = () => {
+    if (historyIndexRef.current <= 0 || historyLockRef.current) return;
+    historyLockRef.current = true;
+    historyIndexRef.current -= 1;
+    const snap = historyRef.current[historyIndexRef.current];
+    if (snap) {
+      setScenes(JSON.parse(JSON.stringify(snap.scenes)));
+      setEditingSceneId(null);
+      if (snap.settings && project) {
+        setProject({ ...project, settings: snap.settings });
+        fetch(`/api/projects/${project.id}/settings`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(snap.settings)
+        }).catch(() => {});
+      }
+    }
+    setCanUndo(historyIndexRef.current > 0);
+    setCanRedo(true);
+    setTimeout(() => { historyLockRef.current = false; }, 150);
+  };
+
+  const handleRedo = () => {
+    if (historyIndexRef.current >= historyRef.current.length - 1 || historyLockRef.current) return;
+    historyLockRef.current = true;
+    historyIndexRef.current += 1;
+    const snap = historyRef.current[historyIndexRef.current];
+    if (snap) {
+      setScenes(JSON.parse(JSON.stringify(snap.scenes)));
+      setEditingSceneId(null);
+      if (snap.settings && project) {
+        setProject({ ...project, settings: snap.settings });
+        fetch(`/api/projects/${project.id}/settings`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(snap.settings)
+        }).catch(() => {});
+      }
+    }
+    setCanUndo(true);
+    setCanRedo(historyIndexRef.current < historyRef.current.length - 1);
+    setTimeout(() => { historyLockRef.current = false; }, 150);
+  };
+
+  // Keyboard shortcuts: Ctrl+Z undo, Ctrl+Y / Ctrl+Shift+Z redo
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        // Only intercept when not typing in a field unless modifier held for redo
+        if (!(e.ctrlKey || e.metaKey)) return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) handleRedo(); else handleUndo();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
+        e.preventDefault();
+        handleRedo();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [scenes, project]);
 
   // Live styling options (override project settings in real time!)
   const [subtitleEnabled, setSubtitleEnabled] = useState(true);
@@ -130,6 +218,18 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
   const [isDownloadingTikTok, setIsDownloadingTikTok] = useState(false);
   const [tiktokDownloaded, setTiktokDownloaded] = useState<StockClip | null>(null);
   const [tiktokError, setTiktokError] = useState("");
+  // TikTok search state
+  const [tiktokSearch, setTiktokSearch] = useState("");
+  const [tiktokSearchResults, setTiktokSearchResults] = useState<any[]>([]);
+  const [isSearchingTikTok, setIsSearchingTikTok] = useState(false);
+  const [tiktokSearchActive, setTiktokSearchActive] = useState(false);
+  // TikTok hover/touch video preview state
+  const [ttPreview, setTtPreview] = useState<{ videoId: string; url: string } | null>(null);
+  const [ttPreviewLoading, setTtPreviewLoading] = useState<string | null>(null);
+  const ttPreviewCache = useRef<Record<string, string>>({});
+  const ttPreviewTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ttPreviewDelay = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ttPreviewPending = useRef<string | null>(null);
 
   // Pinterest import state
   const [pinterestMode, setPinterestMode] = useState(false);
@@ -137,11 +237,25 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
   const [isDownloadingPinterest, setIsDownloadingPinterest] = useState(false);
   const [pinterestDownloaded, setPinterestDownloaded] = useState<StockClip | null>(null);
   const [pinterestError, setPinterestError] = useState("");
+  const [pinterestSearch, setPinterestSearch] = useState("");
+  const [pinterestSearchResults, setPinterestSearchResults] = useState<any[]>([]);
+  const [isSearchingPinterest, setIsSearchingPinterest] = useState(false);
+  const [pinterestSearchActive, setPinterestSearchActive] = useState(false);
+  // Hover/touch video preview for Pinterest results (direct mp4 from search)
+  const [pinPreview, setPinPreview] = useState<string | null>(null);
 
   // SEO modal/results state
   const [isGeneratingSEO, setIsGeneratingSEO] = useState(false);
   const [seoResult, setSeoResult] = useState<{ viralTitle: string; description: string; hashtags: string[] } | null>(null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
+  // v16: A/B Title Generator
+  const [isGeneratingAB, setIsGeneratingAB] = useState(false);
+  const [abResult, setAbResult] = useState<{
+    variants: { title: string; angle: string; ctrScore: number; reasoning: string }[];
+    winner: number;
+    insight: string;
+  } | null>(null);
+  const [abError, setAbError] = useState("");
 
   // Copy Script state
   const [copyScriptSuccess, setCopyScriptSuccess] = useState(false);
@@ -155,16 +269,26 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
   const [youtubeHasCookies, setYoutubeHasCookies] = useState(false);
   const [isYoutubeUploading, setIsYoutubeUploading] = useState(false);
   const [youtubeResult, setYoutubeResult] = useState<{ url: string; title: string } | null>(null);
+  const [youtubeError, setYoutubeError] = useState<string | null>(null);
   const [scheduleDate, setScheduleDate] = useState("");
   const [scheduleTime, setScheduleTime] = useState("");
   const [scheduledInfo, setScheduledInfo] = useState<{ scheduledAt: string; status: string } | null>(null);
   const [isScheduling, setIsScheduling] = useState(false);
+  // Multi-channel: connected accounts + which one to upload to
+  const [ytAccounts, setYtAccounts] = useState<{ id: string; channelTitle: string; isDefault: boolean }[]>([]);
+  const [selectedAccountId, setSelectedAccountId] = useState<string>("");
 
-  // Check YouTube auth status
+  // Check YouTube auth status + connected channels
   useEffect(() => {
     fetch("/api/youtube/status").then(r => r.json()).then(d => {
       setYoutubeAuth(d.authenticated);
       setYoutubeHasCookies(d.hasCookies || false);
+    }).catch(() => {});
+    fetch("/api/youtube/accounts").then(r => r.json()).then(d => {
+      const accs = Array.isArray(d.accounts) ? d.accounts : [];
+      setYtAccounts(accs);
+      const def = accs.find((a: any) => a.isDefault) || accs[0];
+      if (def) setSelectedAccountId(def.id);
     }).catch(() => {});
   }, []);
 
@@ -176,8 +300,13 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
       return;
     }
     setIsYoutubeUploading(true);
+    setYoutubeError(null);
     try {
-      const res = await fetch(`/api/youtube/upload/${project!.id}`, { method: "POST" });
+      const res = await fetch(`/api/youtube/upload/${project!.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountId: selectedAccountId || undefined })
+      });
       const data = await res.json();
       if (data.success) {
         setYoutubeResult(data);
@@ -185,9 +314,11 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
         window.location.href = data.authUrl;
       } else {
         console.error("Upload failed:", data.error);
+        setYoutubeError(data.error || "Upload failed");
       }
     } catch (e: any) {
       console.error(e);
+      setYoutubeError(e.message || "Upload error");
     } finally {
       setIsYoutubeUploading(false);
     }
@@ -199,6 +330,34 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
   const [ttsRate, setTtsRate] = useState("+0%");
   const [isGeneratingTts, setIsGeneratingTts] = useState(false);
   const [ttsStatus, setTtsStatus] = useState<string | null>(null);
+  // v16: voice preview (listen before generating full voiceover)
+  const [isPreviewingVoice, setIsPreviewingVoice] = useState(false);
+  const [voicePreviewUrl, setVoicePreviewUrl] = useState<string | null>(null);
+  const ttsVoicePreviewRef = useRef<HTMLAudioElement | null>(null);
+
+  const handlePreviewVoice = async () => {
+    setIsPreviewingVoice(true);
+    setVoicePreviewUrl(null);
+    try {
+      const res = await fetch("/api/voices/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ voice: ttsVoice, rate: ttsRate })
+      });
+      const data = await res.json();
+      if (data.success && data.url) {
+        setVoicePreviewUrl(data.url);
+        // auto-play
+        setTimeout(() => { ttsVoicePreviewRef.current?.play().catch(() => {}); }, 100);
+      } else {
+        setTtsStatus(`Preview failed: ${data.error || "unknown"}`);
+      }
+    } catch (e: any) {
+      setTtsStatus(`Preview error: ${e.message}`);
+    } finally {
+      setIsPreviewingVoice(false);
+    }
+  };
 
   useEffect(() => {
     if (project?.settings) {
@@ -213,8 +372,8 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
     if (project) {
       project.settings.edgeTtsEnabled = enabled;
       project.settings.edgeTtsRate = ttsRate;
-      await fetch("/api/settings", {
-        method: "POST",
+      await fetch(`/api/projects/${project.id}/settings`, {
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(project.settings)
       });
@@ -234,6 +393,14 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
       const data = await res.json();
       if (data.success) {
         setAudioVoiceover(data.audioTrack);
+        // v16 FIX: keep local project.settings.audioSettings in sync with the server
+        // so a later full-settings PATCH can't send a stale empty audioSettings
+        // and wipe the saved voiceoverTrack reference.
+        if (project.settings) {
+          const as: any = (project.settings as any).audioSettings || {};
+          as.voiceoverTrack = data.audioTrack;
+          (project.settings as any).audioSettings = as;
+        }
         setTtsStatus(null);
       } else {
         setTtsStatus(`Error: ${data.error}`);
@@ -257,7 +424,10 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
     if (!project || !scheduleDate || !scheduleTime) return;
     setIsScheduling(true);
     try {
-      const scheduledAt = new Date(`${scheduleDate}T${scheduleTime}`).toISOString();
+      // Send a NAIVE date-time string — the server runs in IST (Asia/Kolkata)
+      // and interprets it as Indian time, so the upload happens at the chosen
+      // IST hour no matter what timezone this browser/device is set to.
+      const scheduledAt = `${scheduleDate}T${scheduleTime}`;
       const res = await fetch(`/api/youtube/schedule/${project.id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -265,7 +435,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
       });
       const data = await res.json();
       if (data.success) {
-        setScheduledInfo({ scheduledAt, status: "pending" });
+        setScheduledInfo({ scheduledAt: data.scheduledAt, status: "pending" });
         setScheduleDate("");
         setScheduleTime("");
       }
@@ -302,10 +472,169 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
   const [bgmLoading, setBgmLoading] = useState(false);
   const [sfxLoading, setSfxLoading] = useState(false);
   const [autoSfxEnabled, setAutoSfxEnabled] = useState(false);
+  const [autoTikTokSource, setAutoTikTokSource] = useState(false);
+  const [blurTikTokWatermark, setBlurTikTokWatermark] = useState(false);
+  const [blurX, setBlurX] = useState(400);
+  const [blurY, setBlurY] = useState(1500);
+  const [blurW, setBlurW] = useState(280);
+  const [blurH, setBlurH] = useState(80);
   const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
   const previewAudioRef2 = useRef<HTMLAudioElement | null>(null);
   const [previewSfxUrl, setPreviewSfxUrl] = useState<string | null>(null);
   const sfxPreviewRef = useRef<HTMLAudioElement | null>(null);
+
+  // v14: Creative Suite state
+  const [videoTemplate, setVideoTemplate] = useState<string>("none");
+  const [colorGrade, setColorGrade] = useState<string>("none");
+  const [voiceEffect, setVoiceEffect] = useState<string>("none");
+  const [emojiOverlays, setEmojiOverlays] = useState<string>("none");
+  const [silenceRemoval, setSilenceRemoval] = useState(false);
+  const [qualityFilter, setQualityFilter] = useState(true);
+  const [beatSync, setBeatSync] = useState(false);
+  const [rewriteStyle, setRewriteStyle] = useState("viral");
+  const [rewriting, setRewriting] = useState(false);
+  const [rewriteResult, setRewriteResult] = useState<{ rewrittenScript: string; hook: string; changes: string[] } | null>(null);
+  const [rewriteError, setRewriteError] = useState("");
+  const [stockMood, setStockMood] = useState("");
+  const [stockTracks, setStockTracks] = useState<any[]>([]);
+  const [stockSearching, setStockSearching] = useState(false);
+  const [stockDownloading, setStockDownloading] = useState("");
+
+  // Load v14 settings when project loads
+  useEffect(() => {
+    if (project?.settings) {
+      const s: any = project.settings;
+      setVideoTemplate(s.videoTemplate || "none");
+      setColorGrade(s.colorGrade || "none");
+      setVoiceEffect(s.voiceEffect || "none");
+      setEmojiOverlays(s.emojiOverlays || "none");
+      setSilenceRemoval(s.silenceRemoval === true);
+      setQualityFilter(s.footageQualityFilter !== false);
+      setBeatSync(s.beatSyncEnabled === true);
+    }
+  }, [project?.id]);
+
+  // v14: persist a single settings key
+  const patchSetting = async (key: string, value: any) => {
+    if (!project) return;
+    (project.settings as any)[key] = value;
+    try {
+      await fetch(`/api/projects/${project.id}/settings`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(project.settings)
+      });
+    } catch (e) { /* ignore */ }
+  };
+
+  // v14: Script Rewriter
+  const handleRewriteScript = async () => {
+    if (!project) return;
+    setRewriting(true);
+    setRewriteError("");
+    setRewriteResult(null);
+    try {
+      const res = await fetch(`/api/projects/${project.id}/rewrite-script`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ style: rewriteStyle })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || "Rewrite failed");
+      setRewriteResult({ rewrittenScript: data.rewrittenScript, hook: data.hook, changes: data.changes || [] });
+    } catch (e: any) {
+      setRewriteError(e.message || "Script rewrite failed");
+    } finally {
+      setRewriting(false);
+    }
+  };
+
+  // v14: Apply rewritten script — split evenly across existing scenes and persist each
+  const applyRewrittenScript = async () => {
+    if (!project || !rewriteResult) return;
+    const lines = rewriteResult.rewrittenScript
+      .split(/\n+/)
+      .map(l => l.trim())
+      .filter(Boolean);
+    if (!lines.length || !scenes.length) return;
+    // Distribute lines across scenes as evenly as possible
+    const perScene = Math.max(1, Math.ceil(lines.length / scenes.length));
+    const updated = scenes.map((s, i) => {
+      const chunk = lines.slice(i * perScene, (i + 1) * perScene).join(" ");
+      return {
+        ...s,
+        text: chunk || s.text,
+        hook: i === 0 ? rewriteResult.hook : s.hook,
+      };
+    });
+    setScenes(updated);
+    project.script = rewriteResult.rewrittenScript;
+    try {
+      await fetch(`/api/projects/${project.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ script: rewriteResult.rewrittenScript })
+      });
+      for (const s of updated) {
+        await fetch(`/api/projects/${project.id}/scenes/${s.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: s.text, hook: s.hook })
+        });
+      }
+    } catch (e) { /* ignore */ }
+    setRewriteResult(null);
+  };
+
+  // v14: Stock music search + apply as BGM
+  const searchStockMusic = async () => {
+    setStockSearching(true);
+    setStockTracks([]);
+    try {
+      const res = await fetch(`/api/audio/stock/search?mood=${encodeURIComponent(stockMood || "cinematic")}`);
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || "Search failed");
+      setStockTracks(data.tracks || []);
+    } catch (e: any) {
+      setStockTracks([]);
+      alert(e.message || "Stock music search failed");
+    } finally {
+      setStockSearching(false);
+    }
+  };
+
+  const useStockTrack = async (track: any) => {
+    if (!project) return;
+    setStockDownloading(track.id);
+    try {
+      const res = await fetch(track.downloadUrl);
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || "Download failed");
+      // Probe duration client-side via audio element
+      let duration = track.duration || 30;
+      const as: any = project.settings.audioSettings || { voiceVolume: 100, musicVolume: 15, bgmMode: "loop", autoSync: false };
+      as.bgmTrack = {
+        type: "bgm",
+        url: data.url,
+        filePath: data.filePath,
+        fileName: data.fileName,
+        fileSize: 0,
+        duration,
+        format: "mp3"
+      };
+      project.settings.audioSettings = as;
+      setAudioBgm(as.bgmTrack);
+      await fetch(`/api/projects/${project.id}/settings`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(project.settings)
+      });
+    } catch (e: any) {
+      alert(e.message || "Could not use this track");
+    } finally {
+      setStockDownloading("");
+    }
+  };
 
   // Load audio tracks from project settings
   useEffect(() => {
@@ -515,7 +844,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
 
         // Apply defaults from settings on load
         if (data.project) {
-          setSubtitleEnabled(data.project.settings.subtitleEnabled);
+          setSubtitleEnabled(data.project.settings.subtitleEnabled ?? false);
           setSelectedStyle(data.project.settings.subtitleStyle);
           setFontSize(data.project.settings.fontSize !== undefined ? data.project.settings.fontSize : 14);
           setWordSpacing(data.project.settings.wordSpacing !== undefined ? data.project.settings.wordSpacing : 8);
@@ -525,6 +854,12 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
             setTransitionDuration(data.project.settings.transitionDuration);
           }
           setAutoSfxEnabled(data.project.settings.autoSfxEnabled ?? false);
+          setAutoTikTokSource(data.project.settings.autoTikTokSource ?? false);
+          setBlurTikTokWatermark(data.project.settings.blurTikTokWatermark ?? false);
+          setBlurX(data.project.settings.blurX ?? 400);
+          setBlurY(data.project.settings.blurY ?? 1500);
+          setBlurW(data.project.settings.blurW ?? 280);
+          setBlurH(data.project.settings.blurH ?? 80);
         }
       }
     } catch (e) {
@@ -615,9 +950,13 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
     };
   }, [isPlaying, isFullScreenPlaying, isFullScreenOpen, fullScreenMode, activeSceneIndex, scenes]);
 
-  // Handle scene change (swapping background source video for active player)
+  // Handle source swap for the ACTIVE player.
+  // When the fullscreen overlay is open (storyboard OR rendered mode) we must operate
+  // on fullScreenVideoRef. Previously this only handled storyboard mode, so in
+  // "rendered" mode it fell through to the background player and the compiled MP4
+  // never got .load()/.play() — the fullscreen video stayed frozen.
   useEffect(() => {
-    if (isFullScreenOpen && fullScreenMode === "storyboard") {
+    if (isFullScreenOpen) {
       if (fullScreenVideoRef.current) {
         fullScreenVideoRef.current.load();
         if (isFullScreenPlaying) {
@@ -654,11 +993,20 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           settings: {
-            subtitleEnabled,
+            subtitleEnabled: subtitleEnabled ?? false,
             subtitleStyle: selectedStyle,
             fontSize,
             wordSpacing,
-            letterSpacing
+            letterSpacing,
+            autoTikTokSource: autoTikTokSource ?? false,
+            blurTikTokWatermark: blurTikTokWatermark ?? false,
+            blurX: blurX ?? 400,
+            blurY: blurY ?? 1500,
+            blurW: blurW ?? 280,
+            blurH: blurH ?? 80,
+            transitionType,
+            transitionDuration,
+            autoSfxEnabled
           }
         })
       });
@@ -760,6 +1108,118 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
     }
   };
 
+  // TikTok Search
+  const handleTikTokSearch = async () => {
+    if (!tiktokSearch.trim()) return;
+    setIsSearchingTikTok(true);
+    setTiktokSearchResults([]);
+    setTiktokError("");
+    try {
+      const res = await fetch("/api/tiktok/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keyword: tiktokSearch.trim(), count: "60" })
+      });
+      const data = await res.json();
+      if (data.results?.length) {
+        setTiktokSearchResults(data.results);
+      } else {
+        setTiktokError(data.message || "No results found. Try a different keyword.");
+      }
+    } catch (e: any) {
+      setTiktokError(e.message || "Search failed");
+    } finally {
+      setIsSearchingTikTok(false);
+    }
+  };
+
+  // TikTok hover/touch video preview — resolves a direct mp4 via the backend
+  // (urlebird video page) and plays it muted inline, like TikTok/YouTube hover
+  // previews. Cached per video id so re-hovering is instant.
+  const stopTikTokPreview = () => {
+    if (ttPreviewTimer.current) { clearTimeout(ttPreviewTimer.current); ttPreviewTimer.current = null; }
+    if (ttPreviewDelay.current) { clearTimeout(ttPreviewDelay.current); ttPreviewDelay.current = null; }
+    ttPreviewPending.current = null;
+    setTtPreview(null);
+    setTtPreviewLoading(null);
+  };
+
+  const startTikTokPreview = (videoId: string, urlebirdUrl?: string) => {
+    if (ttPreviewDelay.current) clearTimeout(ttPreviewDelay.current);
+    ttPreviewPending.current = videoId;
+    // Small delay so quick scroll-through doesn't fire a request per card
+    ttPreviewDelay.current = setTimeout(async () => {
+      if (ttPreviewPending.current !== videoId) return;
+      const cached = ttPreviewCache.current[videoId];
+      if (cached) {
+        setTtPreview({ videoId, url: cached });
+        setTtPreviewLoading(null);
+        return;
+      }
+      setTtPreviewLoading(videoId);
+      try {
+        const res = await fetch("/api/tiktok/preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ videoId, urlebirdUrl: urlebirdUrl || "" })
+        });
+        const data = await res.json();
+        if (ttPreviewPending.current !== videoId) return; // user moved away
+        if (data.previewUrl) {
+          ttPreviewCache.current[videoId] = data.previewUrl;
+          setTtPreview({ videoId, url: data.previewUrl });
+        }
+      } catch {
+        // preview is best-effort; never block the UI
+      } finally {
+        if (ttPreviewPending.current === videoId) setTtPreviewLoading(null);
+      }
+    }, 350);
+  };
+
+  // Auto-stop the preview after ~10s so it behaves like a short teaser
+  useEffect(() => {
+    if (!ttPreview) return;
+    ttPreviewTimer.current = setTimeout(() => setTtPreview(null), 10000);
+    return () => { if (ttPreviewTimer.current) clearTimeout(ttPreviewTimer.current); };
+  }, [ttPreview]);
+
+  // Download from TikTok search result
+  const handleTikTokSearchDownload = async (video: any) => {
+    try {
+      setIsDownloadingTikTok(true);
+      setTiktokError("");
+      const res = await fetch("/api/tiktok/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: `https://www.tiktok.com/@x/video/${video.id}`, projectId: project!.id })
+      });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Download failed"); }
+      const data = await res.json();
+      const newClip: StockClip = {
+        id: `tiktok_${Date.now()}`,
+        url: data.clip.url,
+        previewUrl: video.cover || "",
+        provider: "tiktok",
+        duration: video.duration || 10,
+        width: 1080,
+        height: 1920,
+        title: video.title || "TikTok Import",
+        tags: ["tiktok", "imported"],
+        relevanceScore: 100,
+        scoreExplanation: "User-searched TikTok video.",
+        aspectRatio: "9:16"
+      };
+      setTiktokDownloaded(newClip);
+      await handleSwapClip(newClip);
+      setIsSwapModalOpen(false);
+    } catch (e: any) {
+      setTiktokError(e.message || "Download failed");
+    } finally {
+      setIsDownloadingTikTok(false);
+    }
+  };
+
   // Download Pinterest pin video and add as clip
   const handlePinterestDownload = async () => {
     if (!pinterestUrl.trim()) return;
@@ -804,9 +1264,74 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
     }
   };
 
+  // Pinterest Search
+  const handlePinterestSearch = async () => {
+    if (!pinterestSearch.trim()) return;
+    setIsSearchingPinterest(true);
+    setPinterestSearchResults([]);
+    setPinterestError("");
+    try {
+      const res = await fetch("/api/pinterest/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keyword: pinterestSearch.trim(), count: "25" })
+      });
+      const data = await res.json();
+      if (data.results?.length) {
+        setPinterestSearchResults(data.results);
+      } else {
+        setPinterestError("No results found. Try a different keyword.");
+      }
+    } catch (e: any) {
+      setPinterestError(e.message || "Search failed");
+    } finally {
+      setIsSearchingPinterest(false);
+    }
+  };
+
+  // Download Pinterest search result
+  const handlePinterestSearchDownload = async (pin: any) => {
+    if (!pin?.url) return;
+    setIsDownloadingPinterest(true);
+    setPinterestError("");
+    try {
+      const res = await fetch("/api/pinterest/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: pin.url, videoUrl: pin.video || "", projectId: project!.id })
+      });
+      if (!res.ok) throw new Error("Download failed");
+      const data = await res.json();
+      if (data.clip) {
+        const newClip: StockClip = {
+          id: data.clip.id || `pin_${Date.now()}`,
+          provider: "pinterest",
+          url: data.clip.url,
+          previewUrl: pin.cover || "",
+          title: pin.title || "Pinterest Import",
+          duration: 10,
+          width: 1080,
+          height: 1920,
+          tags: ["pinterest", "searched"],
+          relevanceScore: 100,
+          scoreExplanation: "Searched from Pinterest.",
+          aspectRatio: "9:16"
+        };
+        setPinterestDownloaded(newClip);
+        await handleSwapClip(newClip);
+        setIsSwapModalOpen(false);
+      }
+    } catch (e: any) {
+      setPinterestError(e.message || "Download failed. Try another pin.");
+    } finally {
+      setIsDownloadingPinterest(false);
+    }
+  };
+
   const handleSwapClip = async (clip: StockClip) => {
     const scene = scenes[activeSceneIndex];
     if (!scene) return;
+    pushHistory();
 
     try {
       const res = await fetch(`/api/projects/${projectId}/scenes/${scene.id}/swap-clip`, {
@@ -826,6 +1351,112 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
     }
   };
 
+  // Reorder a scene up/down in the storyboard (persists sceneIndex order)
+  const handleReorderScene = async (idx: number, dir: -1 | 1) => {
+    const target = idx + dir;
+    if (target < 0 || target >= scenes.length) return;
+    pushHistory();
+    const next = [...scenes];
+    [next[idx], next[target]] = [next[target], next[idx]];
+    setScenes(next);
+    setActiveSceneIndex(target);
+    try {
+      await fetch(`/api/projects/${projectId}/scenes/reorder`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sceneIds: next.map(s => s.id) })
+      });
+    } catch (e) { console.error(e); }
+  };
+
+  // Change a scene's duration (trim) by +/- 0.5s and persist
+  const handleSceneDuration = async (sceneId: string, delta: number) => {
+    const scene = scenes.find(s => s.id === sceneId);
+    if (!scene) return;
+    pushHistory();
+    const duration = Math.max(1, Math.min(30, Math.round((scene.duration + delta) * 10) / 10));
+    setScenes(scenes.map(s => s.id === sceneId ? { ...s, duration } : s));
+    try {
+      await fetch(`/api/projects/${projectId}/scenes/${sceneId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ duration })
+      });
+    } catch (e) { console.error(e); }
+  };
+
+  // Persist a settings patch + sync local project state
+  const updateSettings = async (patch: Partial<UserSettings>) => {
+    if (!project) return;
+    const next = { ...project.settings, ...patch };
+    setProject({ ...project, settings: next });
+    try {
+      await fetch(`/api/projects/${project.id}/settings`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(next)
+      });
+    } catch (e) { console.error(e); }
+  };
+
+  // v13 Render Studio: upload a watermark logo (base64) and store its URL on the project
+  const handleWatermarkUpload = async (file: File) => {
+    if (!project) return;
+    try {
+      const b64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+        reader.onerror = () => reject(new Error("read failed"));
+        reader.readAsDataURL(file);
+      });
+      const res = await fetch("/api/watermarks/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileData: b64, fileName: file.name })
+      });
+      const data = await res.json();
+      if (data.success) {
+        pushHistory();
+        await updateSettings({ watermarkUrl: data.url, watermarkEnabled: true });
+      }
+    } catch (e) { console.error(e); }
+  };
+
+  // Render Template Presets — one-click bundles of the v13 render settings
+  const TEMPLATE_PRESETS: { id: string; name: string; emoji: string; desc: string; settings: Partial<UserSettings> }[] = [
+    {
+      id: "vertical_viral", name: "Vertical Viral", emoji: "📱",
+      desc: "9:16 TikTok/Reels + Ken Burns + CTA",
+      settings: { aspectRatio: "9:16", kenBurnsEnabled: true, duckingEnabled: true, aiThumbnail: true, watermarkEnabled: false, ctaEnabled: true, ctaText: "Follow for more! 🔔" }
+    },
+    {
+      id: "square_feed", name: "Square Feed", emoji: "🔲",
+      desc: "1:1 Instagram feed + subtle CTA",
+      settings: { aspectRatio: "1:1", kenBurnsEnabled: false, duckingEnabled: true, aiThumbnail: true, watermarkEnabled: false, ctaEnabled: false }
+    },
+    {
+      id: "youtube", name: "YouTube 16:9", emoji: "▶️",
+      desc: "16:9 long-form + subscribe CTA",
+      settings: { aspectRatio: "16:9", kenBurnsEnabled: true, duckingEnabled: true, aiThumbnail: true, watermarkEnabled: false, ctaEnabled: true, ctaText: "Subscribe for more! 🔔" }
+    },
+    {
+      id: "clean_minimal", name: "Clean Minimal", emoji: "🤍",
+      desc: "No overlays, fast export",
+      settings: { aspectRatio: "9:16", kenBurnsEnabled: false, duckingEnabled: false, aiThumbnail: false, watermarkEnabled: false, ctaEnabled: false }
+    },
+    {
+      id: "branded", name: "Branded Pro", emoji: "💎",
+      desc: "Watermark + CTA + Ken Burns",
+      settings: { aspectRatio: "9:16", kenBurnsEnabled: true, duckingEnabled: true, aiThumbnail: true, watermarkEnabled: true, ctaEnabled: true, ctaText: "Follow for more! 🔔" }
+    }
+  ];
+  const applyTemplatePreset = async (presetId: string) => {
+    const preset = TEMPLATE_PRESETS.find(p => p.id === presetId);
+    if (!preset || !project) return;
+    pushHistory();
+    await updateSettings({ ...preset.settings, templatePreset: presetId });
+  };
+
   // Generate SEO suggestions
   const handleGenerateSEO = async () => {
     if (!project) return;
@@ -843,19 +1474,57 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
     }
   };
 
+  // v16: Generate A/B title variants with predicted CTR
+  const handleGenerateABTitles = async () => {
+    if (!project) return;
+    setIsGeneratingAB(true);
+    setAbError("");
+    setAbResult(null);
+    try {
+      const res = await fetch(`/api/projects/${project.id}/ab-titles`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || "A/B title generation failed");
+      setAbResult(data);
+    } catch (e: any) {
+      setAbError(e.message || "A/B title generation failed");
+    } finally {
+      setIsGeneratingAB(false);
+    }
+  };
+
+  // v16: Apply a chosen A/B title as the project's SEO title
+  const handleApplyABTitle = async (title: string) => {
+    if (!project) return;
+    try {
+      await fetch(`/api/projects/${project.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      copyToClipboard(title, "abtitle");
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   // Save edited subtitle script text
   const handleSaveSceneText = async (sceneId: string) => {
     const target = scenes.find(s => s.id === sceneId);
     if (!target) return;
+    pushHistory();
 
     target.text = sceneEditText;
     target.hook = sceneEditHook;
     try {
-      // Simulate/post to server scene edit
+      // Persist text/hook edits to the server (swap-clip endpoint accepts and stores them)
       const res = await fetch(`/api/projects/${projectId}/scenes/${sceneId}/swap-clip`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ clip: { url: target.selectedVideoUrl, id: target.selectedVideoId, provider: target.selectedVideoProvider, previewUrl: target.selectedVideoPreviewUrl, duration: target.selectedVideoDuration } })
+        body: JSON.stringify({
+          clip: { url: target.selectedVideoUrl, id: target.selectedVideoId, provider: target.selectedVideoProvider, previewUrl: target.selectedVideoPreviewUrl, duration: target.selectedVideoDuration },
+          text: sceneEditText,
+          hook: sceneEditHook
+        })
       });
       if (res.ok) {
         // Simple update local
@@ -990,6 +1659,51 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
               </p>
             </div>
           );
+        case SubtitleStyleType.KARAOKE:
+          return (
+            <div className="text-center px-4 select-none">
+              <p className="font-display font-black uppercase tracking-tight flex flex-wrap justify-center leading-normal" style={{ fontSize: `${currentFontSize + 4}px`, columnGap: `${wordSpacing * 1.5 + 4}px`, rowGap: "8px" }}>
+                {words.map((word, idx) => (
+                  <span
+                    key={idx}
+                    style={{ letterSpacing: `${letterSpacing}px` }}
+                    className={`inline-block py-0.5 transition-all duration-500 ${
+                      idx <= halfIndex
+                        ? "text-yellow-400 drop-shadow-[0_3px_3px_rgba(0,0,0,1)]"
+                        : "text-white/90 drop-shadow-[0_2px_2px_rgba(0,0,0,1)]"
+                    }`}
+                  >
+                    {word}
+                  </span>
+                ))}
+              </p>
+            </div>
+          );
+        case SubtitleStyleType.WORD_POP: {
+          const chunk = words.slice(halfIndex - (halfIndex % 2), halfIndex - (halfIndex % 2) + 2).join(" ");
+          return (
+            <div className="text-center px-4 select-none">
+              <span
+                key={halfIndex}
+                className="font-display font-black uppercase text-yellow-400 inline-block animate-pop-in drop-shadow-[0_4px_4px_rgba(0,0,0,1)]"
+                style={{ fontSize: `${currentFontSize + 14}px`, WebkitTextStroke: `${isFullScreen ? "2.5px" : "2px"} black`, letterSpacing: `${letterSpacing}px` }}
+              >
+                {chunk || activeScene.text}
+              </span>
+            </div>
+          );
+        }
+        case SubtitleStyleType.TYPEWRITER: {
+          const visibleChars = Math.max(1, Math.ceil(activeScene.text.length * 0.6));
+          return (
+            <div className="text-center px-4 select-none">
+              <p className="font-mono font-bold text-white drop-shadow-[0_2px_3px_rgba(0,0,0,1)]" style={{ fontSize: `${currentFontSize}px`, letterSpacing: `${letterSpacing}px` }}>
+                {activeScene.text.slice(0, visibleChars)}
+                <span className="animate-pulse text-yellow-400">▌</span>
+              </p>
+            </div>
+          );
+        }
         default: // TIKTOK Style
           return (
             <div className="text-center px-4 select-none leading-none">
@@ -1096,19 +1810,21 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
   return (
     <div className="space-y-6 relative">
       
-      {/* Swap Footage Clip Browser Modal popup */}
-      {isSwapModalOpen && (
+      {/* Swap Footage Clip Browser Modal popup — rendered via portal so the
+          fixed overlay escapes the transformed (motion) ancestor and always
+          centers in the viewport without scrolling */}
+      {isSwapModalOpen && createPortal(
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-50 flex items-center justify-center p-4 animate-fade-in">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-hidden flex flex-col shadow-2xl">
             {/* Modal Header */}
             <div className="p-5 border-b border-slate-800 flex items-center justify-between">
               <div>
-                <h4 className="font-display font-bold text-lg text-white">Swap Storyboard Footage</h4>
+                <h4 className="font-display font-bold text-lg text-ink">Swap Storyboard Footage</h4>
                 <p className="text-slate-400 text-xs mt-0.5">Search multiple stock API providers and select the ultimate matching clip.</p>
               </div>
               <button 
                 onClick={() => setIsSwapModalOpen(false)}
-                className="text-slate-400 hover:text-slate-200 text-xs font-semibold px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg cursor-pointer"
+                className="btn btn-secondary btn-sm"
               >
                 Close
               </button>
@@ -1130,7 +1846,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
               </div>
               <button
                 onClick={() => handleModalSearch(modalSearchQuery)}
-                className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer shrink-0"
+                className="btn btn-primary btn-sm shrink-0"
               >
                 Search API
               </button>
@@ -1167,37 +1883,181 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
 
             {/* TikTok Import section */}
             {tiktokMode && (
-              <div className="p-4 bg-slate-950 border-b border-slate-800/60 space-y-3">
-                <p className="text-[10px] text-slate-400 font-mono leading-relaxed">
-                  Paste a TikTok video URL to download and use as footage. Works with any public TikTok video.
-                </p>
-                <div className="flex items-center gap-3">
-                  <input
-                    type="url"
-                    value={tiktokUrl}
-                    onChange={(e) => { setTiktokUrl(e.target.value); setTiktokError(""); }}
-                    onKeyDown={(e) => e.key === "Enter" && handleTikTokDownload()}
-                    placeholder="https://www.tiktok.com/@user/video/1234567890"
-                    className="flex-1 bg-slate-900 border border-slate-800 focus:border-rose-500 rounded-xl px-4 py-2.5 text-sm text-slate-100 outline-none"
-                  />
+              <div className="p-4 bg-slate-950 border-b border-slate-800/60 space-y-3 flex-1 min-h-0 overflow-y-auto">
+                {/* Mode toggle: URL import vs Search */}
+                <div className="flex gap-2">
                   <button
-                    type="button"
-                    onClick={handleTikTokDownload}
-                    disabled={isDownloadingTikTok || !tiktokUrl.trim()}
-                    className="px-4 py-2.5 bg-rose-600 hover:bg-rose-500 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer shrink-0"
+                    onClick={() => setTiktokSearchActive(false)}
+                    className={`px-2.5 py-1 rounded-md text-[10px] font-bold font-mono transition-colors cursor-pointer ${
+                      !tiktokSearchActive ? "bg-rose-600 text-white" : "text-slate-400 hover:text-slate-200 bg-slate-800/50"
+                    }`}
                   >
-                    {isDownloadingTikTok ? (
-                      <span className="flex items-center gap-1.5">
-                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                        Downloading...
-                      </span>
-                    ) : "Download"}
+                    URL Import
+                  </button>
+                  <button
+                    onClick={() => setTiktokSearchActive(true)}
+                    className={`px-2.5 py-1 rounded-md text-[10px] font-bold font-mono transition-colors cursor-pointer ${
+                      tiktokSearchActive ? "bg-rose-600 text-white" : "text-slate-400 hover:text-slate-200 bg-slate-800/50"
+                    }`}
+                  >
+                    🔍 Search
                   </button>
                 </div>
+
+                {!tiktokSearchActive ? (
+                  <>
+                    <p className="text-[10px] text-slate-400 font-mono leading-relaxed">
+                      Paste a TikTok video URL to download and use as footage. Works with any public TikTok video.
+                    </p>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="url"
+                        value={tiktokUrl}
+                        onChange={(e) => { setTiktokUrl(e.target.value); setTiktokError(""); }}
+                        onKeyDown={(e) => e.key === "Enter" && handleTikTokDownload()}
+                        placeholder="https://www.tiktok.com/@user/video/1234567890"
+                        className="flex-1 bg-slate-900 border border-slate-800 focus:border-rose-500 rounded-xl px-4 py-2.5 text-sm text-slate-100 outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleTikTokDownload}
+                        disabled={isDownloadingTikTok || !tiktokUrl.trim()}
+                        className="btn btn-danger btn-sm shrink-0"
+                      >
+                        {isDownloadingTikTok ? (
+                          <span className="flex items-center gap-1.5">
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            Downloading...
+                          </span>
+                        ) : "Download"}
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-[10px] text-slate-400 font-mono leading-relaxed">
+                      Search TikTok videos by keyword, then download & use any result as footage.
+                    </p>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="text"
+                        value={tiktokSearch}
+                        onChange={(e) => { setTiktokSearch(e.target.value); setTiktokError(""); }}
+                        onKeyDown={(e) => e.key === "Enter" && handleTikTokSearch()}
+                        placeholder="Search TikTok videos..."
+                        className="flex-1 bg-slate-900 border border-slate-800 focus:border-rose-500 rounded-xl px-4 py-2.5 text-sm text-slate-100 outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleTikTokSearch}
+                        disabled={isSearchingTikTok || !tiktokSearch.trim()}
+                        className="btn btn-danger btn-sm shrink-0"
+                      >
+                        {isSearchingTikTok ? (
+                          <span className="flex items-center gap-1.5">
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            Searching...
+                          </span>
+                        ) : <span className="flex items-center gap-1"><Search className="w-3 h-3" /> Search</span>}
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {/* Search Results Grid */}
+                {tiktokSearchActive && isSearchingTikTok && (
+                  <div className="py-6 text-center">
+                    <RefreshCw className="w-6 h-6 text-rose-500 animate-spin mx-auto mb-2" />
+                    <p className="text-[10px] text-slate-400 font-mono">Searching TikTok...</p>
+                  </div>
+                )}
+
+                {tiktokSearchActive && !isSearchingTikTok && tiktokSearchResults.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-[10px] text-slate-500 font-mono">{tiktokSearchResults.length} results — scroll to browse, tap Import to use</p>
+                    <div className="grid grid-cols-3 gap-2">
+                      {tiktokSearchResults.map((video: any) => {
+                        const hasCover = video.cover && !video.cover.startsWith("data:");
+                        const isPreviewing = ttPreview?.videoId === video.id;
+                        const isLoadingPreview = ttPreviewLoading === video.id;
+                        return (
+                        <div
+                          key={video.id}
+                          onMouseEnter={() => startTikTokPreview(video.id, video.urlebirdUrl)}
+                          onMouseLeave={stopTikTokPreview}
+                          className="border border-slate-800 rounded-xl overflow-hidden bg-slate-900/60 group cursor-pointer hover:border-rose-500/80 transition-colors"
+                        >
+                          <div
+                            className="aspect-[9/16] bg-slate-950 relative overflow-hidden"
+                            onClick={() => (isPreviewing ? stopTikTokPreview() : startTikTokPreview(video.id, video.urlebirdUrl))}
+                          >
+                            {hasCover ? (
+                              <img src={video.cover} alt={video.title} className="w-full h-full object-cover" />
+                            ) : (
+                              <div className="flex items-center justify-center h-full text-slate-600 text-[10px]">No preview</div>
+                            )}
+                            {/* Inline video preview (hover/touch) */}
+                            {isPreviewing && (
+                              <video
+                                src={ttPreview!.url}
+                                autoPlay
+                                muted
+                                playsInline
+                                className="absolute inset-0 w-full h-full object-cover"
+                              />
+                            )}
+                            {isLoadingPreview && (
+                              <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+                                <RefreshCw className="w-5 h-5 text-rose-400 animate-spin" />
+                              </div>
+                            )}
+                            {!isPreviewing && !isLoadingPreview && (
+                              <span className="absolute top-2 left-2 text-[8px] bg-black/70 px-1.5 py-0.5 rounded text-slate-300 font-mono opacity-0 group-hover:opacity-100 transition-opacity">
+                                ▶ hover to preview
+                              </span>
+                            )}
+                            {video.duration > 0 && (
+                              <span className="absolute bottom-2 right-2 text-[9px] bg-black/80 px-1.5 py-0.5 rounded text-slate-300 font-mono">
+                                {Math.floor(video.duration / 60)}:{(video.duration % 60).toString().padStart(2, '0')}
+                              </span>
+                            )}
+                            {video.likes > 0 && (
+                              <span className="absolute bottom-2 left-2 text-[9px] bg-black/80 px-1.5 py-0.5 rounded text-rose-400 font-mono">
+                                ❤ {video.likes > 999 ? `${(video.likes/1000).toFixed(1)}K` : video.likes}
+                              </span>
+                            )}
+                          </div>
+                          <div className="p-2">
+                            <p className="text-[9px] text-slate-300 font-mono line-clamp-2 leading-relaxed mb-1">
+                              {video.title || "No title"}
+                            </p>
+                            {video.author && (
+                              <p className="text-[8px] text-slate-500 font-mono mb-1.5">@{video.author}</p>
+                            )}
+                            <button
+                              onClick={(e) => { e.stopPropagation(); stopTikTokPreview(); handleTikTokSearchDownload(video); }}
+                              disabled={isDownloadingTikTok}
+                              className="btn btn-danger btn-xs w-full"
+                            >
+                              {isDownloadingTikTok ? (
+                                <RefreshCw className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <><Download className="w-3 h-3" /> Import</>
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Error messages */}
                 {tiktokError && (
                   <p className="text-[10px] text-rose-400 font-mono">{tiktokError}</p>
                 )}
-                {tiktokDownloaded && !tiktokError && (
+                {tiktokDownloaded && !tiktokError && !tiktokSearchActive && (
                   <p className="text-[10px] text-emerald-400 font-mono flex items-center gap-1">
                     ✅ TikTok video imported! Applying to scene...
                   </p>
@@ -1208,32 +2068,159 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
             {/* Pinterest Import section */}
             {pinterestMode && (
               <div className="p-4 bg-slate-950 border-b border-slate-800/60 space-y-3">
-                <p className="text-[10px] text-slate-400 font-mono leading-relaxed">
-                  Paste a Pinterest pin URL to download the video/image. Works with any public Pinterest pin.
-                </p>
-                <div className="flex items-center gap-3">
-                  <input
-                    type="url"
-                    value={pinterestUrl}
-                    onChange={(e) => { setPinterestUrl(e.target.value); setPinterestError(""); }}
-                    onKeyDown={(e) => e.key === "Enter" && handlePinterestDownload()}
-                    placeholder="https://www.pinterest.com/pin/1234567890/"
-                    className="flex-1 bg-slate-900 border border-slate-800 focus:border-red-500 rounded-xl px-4 py-2.5 text-sm text-slate-100 outline-none"
-                  />
+                {/* Mode toggle: URL import vs Search */}
+                <div className="flex gap-2">
                   <button
-                    type="button"
-                    onClick={handlePinterestDownload}
-                    disabled={isDownloadingPinterest || !pinterestUrl.trim()}
-                    className="px-4 py-2.5 bg-red-700 hover:bg-red-600 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer shrink-0"
+                    onClick={() => setPinterestSearchActive(false)}
+                    className={`px-2.5 py-1 rounded-md text-[10px] font-bold font-mono transition-colors cursor-pointer ${
+                      !pinterestSearchActive ? "bg-red-700 text-white" : "text-slate-400 hover:text-slate-200 bg-slate-800/50"
+                    }`}
                   >
-                    {isDownloadingPinterest ? (
-                      <span className="flex items-center gap-1.5">
-                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                        Downloading...
-                      </span>
-                    ) : "Download"}
+                    URL Import
+                  </button>
+                  <button
+                    onClick={() => setPinterestSearchActive(true)}
+                    className={`px-2.5 py-1 rounded-md text-[10px] font-bold font-mono transition-colors cursor-pointer ${
+                      pinterestSearchActive ? "bg-red-700 text-white" : "text-slate-400 hover:text-slate-200 bg-slate-800/50"
+                    }`}
+                  >
+                    🔍 Search
                   </button>
                 </div>
+
+                {!pinterestSearchActive ? (
+                  <>
+                    <p className="text-[10px] text-slate-400 font-mono leading-relaxed">
+                      Paste a Pinterest pin URL to download the video/image. Works with any public Pinterest pin.
+                    </p>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="url"
+                        value={pinterestUrl}
+                        onChange={(e) => { setPinterestUrl(e.target.value); setPinterestError(""); }}
+                        onKeyDown={(e) => e.key === "Enter" && handlePinterestDownload()}
+                        placeholder="https://www.pinterest.com/pin/1234567890/"
+                        className="flex-1 bg-slate-900 border border-slate-800 focus:border-red-500 rounded-xl px-4 py-2.5 text-sm text-slate-100 outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={handlePinterestDownload}
+                        disabled={isDownloadingPinterest || !pinterestUrl.trim()}
+                        className="btn btn-danger btn-sm shrink-0"
+                      >
+                        {isDownloadingPinterest ? (
+                          <span className="flex items-center gap-1.5">
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            Downloading...
+                          </span>
+                        ) : "Download"}
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-[10px] text-slate-400 font-mono leading-relaxed">
+                      Search Pinterest by keyword, then download and use any pin as footage.
+                    </p>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="text"
+                        value={pinterestSearch}
+                        onChange={(e) => { setPinterestSearch(e.target.value); setPinterestError(""); }}
+                        onKeyDown={(e) => e.key === "Enter" && handlePinterestSearch()}
+                        placeholder="Search Pinterest pins..."
+                        className="flex-1 bg-slate-900 border border-slate-800 focus:border-red-500 rounded-xl px-4 py-2.5 text-sm text-slate-100 outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={handlePinterestSearch}
+                        disabled={isSearchingPinterest || !pinterestSearch.trim()}
+                        className="btn btn-danger btn-sm shrink-0"
+                      >
+                        {isSearchingPinterest ? (
+                          <span className="flex items-center gap-1.5">
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            Searching...
+                          </span>
+                        ) : <span className="flex items-center gap-1"><Search className="w-3 h-3" /> Search</span>}
+                      </button>
+                    </div>
+                  </>
+                )}
+
+                {/* Search Results Grid */}
+                {pinterestSearchActive && isSearchingPinterest && (
+                  <div className="py-6 text-center">
+                    <RefreshCw className="w-6 h-6 text-red-500 animate-spin mx-auto mb-2" />
+                    <p className="text-[10px] text-slate-400 font-mono">Searching Pinterest...</p>
+                  </div>
+                )}
+
+                {pinterestSearchActive && !isSearchingPinterest && pinterestSearchResults.length > 0 && (
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    <p className="text-[10px] text-slate-500 font-mono">{pinterestSearchResults.length} video results — hover/tap to preview</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      {pinterestSearchResults.map((pin: any) => (
+                        <div
+                          key={pin.id}
+                          onMouseEnter={() => pin.video && setPinPreview(pin.id)}
+                          onMouseLeave={() => setPinPreview(null)}
+                          className="border border-slate-800 rounded-xl overflow-hidden bg-slate-900/60 group cursor-pointer hover:border-red-500/80 transition-colors"
+                        >
+                          <div
+                            className="aspect-[9/16] bg-slate-950 relative overflow-hidden"
+                            onClick={() => pin.video && setPinPreview(pinPreview === pin.id ? null : pin.id)}
+                          >
+                            {pin.cover ? (
+                              <img src={pin.cover} alt={pin.title} className="w-full h-full object-cover" />
+                            ) : (
+                              <div className="flex items-center justify-center h-full text-slate-600 text-[10px]">No preview</div>
+                            )}
+                            {/* Inline video preview (hover/touch) — direct mp4 from search */}
+                            {pinPreview === pin.id && pin.video && (
+                              <video
+                                src={pin.video}
+                                autoPlay
+                                muted
+                                loop
+                                playsInline
+                                className="absolute inset-0 w-full h-full object-cover"
+                              />
+                            )}
+                            {pin.video && pinPreview !== pin.id && (
+                              <span className="absolute top-2 left-2 text-[8px] bg-black/70 px-1.5 py-0.5 rounded text-slate-300 font-mono opacity-0 group-hover:opacity-100 transition-opacity">
+                                ▶ hover to preview
+                              </span>
+                            )}
+                            {pin.duration > 0 && (
+                              <span className="absolute bottom-2 right-2 text-[9px] bg-black/80 px-1.5 py-0.5 rounded text-slate-300 font-mono">
+                                {Math.floor(pin.duration / 60)}:{Math.round(pin.duration % 60).toString().padStart(2, '0')}
+                              </span>
+                            )}
+                          </div>
+                          <div className="p-2">
+                            <p className="text-[9px] text-slate-300 font-mono line-clamp-2 leading-relaxed mb-1">
+                              {pin.title || "Untitled Pin"}
+                            </p>
+                            <button
+                              onClick={() => handlePinterestSearchDownload(pin)}
+                              disabled={isDownloadingPinterest}
+                              className="btn btn-danger btn-xs w-full"
+                            >
+                              {isDownloadingPinterest ? (
+                                <RefreshCw className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <><Download className="w-3 h-3" /> Import</>
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Error messages */}
                 {pinterestError && (
                   <p className="text-[10px] text-rose-400 font-mono">{pinterestError}</p>
                 )}
@@ -1307,14 +2294,15 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
             </div>
             )}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Breadcrumb back navigation */}
       <div className="flex items-center justify-between">
         <button
           onClick={onBack}
-          className="flex items-center gap-2 text-slate-400 hover:text-slate-200 text-xs font-semibold px-3 py-2 bg-slate-900 border border-slate-800 rounded-xl transition-all cursor-pointer"
+          className="btn btn-secondary btn-sm"
         >
           <ArrowLeft className="w-4 h-4" />
           Back to Dashboard
@@ -1338,12 +2326,30 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
         <div className="xl:col-span-4 space-y-3 sm:space-y-4">
           <div className="flex items-center justify-between border-b border-slate-800 pb-3">
             <div className="flex items-center gap-3">
-              <span className="w-2 h-2 bg-[#2FD0C4] rounded-full shadow-[0_0_8px_#2FD0C4]"></span>
-              <h3 className="font-display font-bold text-lg text-[#F3F6FA]">Storyboard</h3>
+              <span className="w-2 h-2 bg-[#E1306C] rounded-full shadow-[0_0_8px_#E1306C]"></span>
+              <h3 className="font-display font-bold text-lg text-ink">Storyboard</h3>
             </div>
             <span className="text-[10px] bg-slate-900 border border-slate-800 text-slate-400 px-2 py-0.5 rounded font-mono">
               {scenes.length} scenes
             </span>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={handleUndo}
+                disabled={!canUndo}
+                title="Undo (Ctrl+Z)"
+                className="p-1.5 bg-slate-900 border border-slate-800 rounded-lg text-slate-400 hover:text-[#E1306C] hover:border-[#E1306C]/40 disabled:opacity-30 disabled:pointer-events-none transition-colors cursor-pointer"
+              >
+                <Undo2 className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={handleRedo}
+                disabled={!canRedo}
+                title="Redo (Ctrl+Y)"
+                className="p-1.5 bg-slate-900 border border-slate-800 rounded-lg text-slate-400 hover:text-[#E1306C] hover:border-[#E1306C]/40 disabled:opacity-30 disabled:pointer-events-none transition-colors cursor-pointer"
+              >
+                <Redo2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
 
           <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
@@ -1407,6 +2413,54 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                           onChange={(e) => setSceneEditText(e.target.value)}
                           className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 outline-none resize-none h-16"
                         />
+                        {/* Scene trim / duration stepper */}
+                        <div className="flex items-center justify-between bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5">
+                          <span className="text-[9px] font-mono text-slate-500 uppercase tracking-wider font-bold">Trim (duration)</span>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); handleSceneDuration(scene.id, -0.5); }}
+                              title="Shorter clip (-0.5s)"
+                              className="w-6 h-6 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 text-xs font-bold cursor-pointer"
+                            >−</button>
+                            <span className="text-[10px] font-mono text-[#E1306C] font-bold min-w-[34px] text-center">{scene.duration}s</span>
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); handleSceneDuration(scene.id, 0.5); }}
+                              title="Longer clip (+0.5s)"
+                              className="w-6 h-6 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 text-xs font-bold cursor-pointer"
+                            >+</button>
+                          </div>
+                        </div>
+                        {/* v14: Speed Ramping */}
+                        <div className="flex items-center justify-between bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5">
+                          <span className="text-[9px] font-mono text-slate-500 uppercase tracking-wider font-bold">⚡ Speed Ramp</span>
+                          <select
+                            value={scene.speed && scene.speed !== 1 ? String(scene.speed) : "1"}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={async (e) => {
+                              const spd = parseFloat(e.target.value);
+                              try {
+                                const res = await fetch(`/api/projects/${project.id}/scenes/${scene.id}`, {
+                                  method: "PATCH",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({ speed: spd })
+                                });
+                                if (res.ok) {
+                                  setScenes(scenes.map(s => s.id === scene.id ? { ...s, speed: spd } : s));
+                                }
+                              } catch (err) { /* ignore */ }
+                            }}
+                            className="bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 text-[10px] font-mono text-slate-200 outline-none"
+                          >
+                            <option value="0.5">0.5x slow-mo</option>
+                            <option value="0.75">0.75x slow</option>
+                            <option value="1">1x normal</option>
+                            <option value="1.5">1.5x fast</option>
+                            <option value="2">2x fast</option>
+                            <option value="3">3x turbo</option>
+                          </select>
+                        </div>
                         <div className="flex items-center gap-1.5 justify-end">
                           <button
                             onClick={() => setEditingSceneId(null)}
@@ -1416,7 +2470,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                           </button>
                           <button
                             onClick={() => handleSaveSceneText(scene.id)}
-                            className="px-2.5 py-1 bg-indigo-600 text-[10px] text-white rounded font-bold cursor-pointer"
+                            className="btn btn-primary btn-xs"
                           >
                             Save
                           </button>
@@ -1450,21 +2504,43 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                   </div>
 
                   {/* Metadata and Swap Button */}
-                  <div className="flex items-center justify-between border-t border-slate-800/40 pt-2">
-                    <span className="text-[9px] text-slate-400 truncate max-w-[65%] font-mono">
+                  <div className="flex items-center justify-between border-t border-slate-800/40 pt-2 gap-2">
+                    <span className="text-[9px] text-slate-400 truncate max-w-[38%] font-mono">
                       Query tags: {scene.keywords.slice(0, 2).join(", ")}
                     </span>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setActiveSceneIndex(idx);
-                        openSwapModal(idx);
-                      }}
-                      className="flex items-center gap-1 px-2 py-1 bg-slate-950 border border-slate-800 hover:bg-slate-800 rounded text-[10px] text-indigo-400 hover:text-indigo-300 font-semibold transition-colors cursor-pointer"
-                    >
-                      <Search className="w-3 h-3" />
-                      Swap Footage
-                    </button>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {/* Scene reorder arrows */}
+                      <div className="flex flex-col -space-y-2.5 mr-0.5">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleReorderScene(idx, -1); }}
+                          disabled={idx === 0}
+                          title="Move scene up"
+                          className="w-5 h-3.5 flex items-center justify-center bg-slate-950 border border-slate-800 hover:border-indigo-500/50 hover:text-indigo-400 rounded-sm text-slate-500 disabled:opacity-25 disabled:pointer-events-none transition-colors cursor-pointer"
+                        >
+                          <ArrowUp className="w-2.5 h-2.5" />
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleReorderScene(idx, 1); }}
+                          disabled={idx === scenes.length - 1}
+                          title="Move scene down"
+                          className="w-5 h-3.5 flex items-center justify-center bg-slate-950 border border-slate-800 hover:border-indigo-500/50 hover:text-indigo-400 rounded-sm text-slate-500 disabled:opacity-25 disabled:pointer-events-none transition-colors cursor-pointer"
+                        >
+                          <ArrowDown className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+                      <span className="text-[9px] font-mono bg-slate-950 border border-slate-800 text-[#E1306C] px-1.5 py-0.5 rounded">{scene.duration}s</span>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setActiveSceneIndex(idx);
+                          openSwapModal(idx);
+                        }}
+                        className="flex items-center gap-1 px-2 py-1 bg-slate-950 border border-slate-800 hover:bg-slate-800 rounded text-[10px] text-indigo-400 hover:text-indigo-300 font-semibold transition-colors cursor-pointer"
+                      >
+                        <Search className="w-3 h-3" />
+                        Swap Footage
+                      </button>
+                    </div>
                   </div>
                 </motion.div>
               );
@@ -1481,7 +2557,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
         >
           <div className="w-full flex items-center justify-between border-b border-slate-800 pb-2 sm:pb-3 shrink-0 px-1">
               <div className="flex items-center gap-3">
-                <span className="w-2 h-2 bg-[#2FD0C4] rounded-full shadow-[0_0_8px_#2FD0C4]"></span>
+                <span className="w-2 h-2 bg-[#E1306C] rounded-full shadow-[0_0_8px_#E1306C]"></span>
                 <span className="hud-label text-[10px]">Live Preview</span>
               </div>
               <span className="tag-chip tag-chip--signal text-[9px]">9:16</span>
@@ -1543,6 +2619,8 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
               <button
                 onClick={() => {
                   setFullScreenMode("storyboard");
+                  setIsFullScreenPlaying(isPlaying);
+                  setIsFullScreenMuted(isMuted);
                   setIsFullScreenOpen(true);
                 }}
                 className="p-1.5 rounded-lg bg-black/40 hover:bg-black/60 backdrop-blur-sm border border-slate-800/30 text-slate-300 hover:text-white transition-all cursor-pointer flex items-center justify-center shadow-lg hover:scale-105 active:scale-95"
@@ -1556,7 +2634,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
             <div className="absolute bottom-4 inset-x-4 bg-black/60 border border-slate-800/50 backdrop-blur-md rounded-2xl p-2.5 z-10 flex items-center justify-between gap-3 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity duration-300">
               <button
                 onClick={() => setIsPlaying(!isPlaying)}
-                className="w-8 h-8 rounded-xl bg-indigo-600 hover:bg-indigo-500 flex items-center justify-center text-white cursor-pointer shrink-0"
+                className="btn btn-primary btn-icon btn-sm shrink-0"
               >
                 {isPlaying ? <Pause className="w-4 h-4 fill-white" /> : <Play className="w-4 h-4 fill-white ml-0.5" />}
               </button>
@@ -1611,6 +2689,9 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                     <option value={SubtitleStyleType.CINEMATIC}>Cinematic Serif</option>
                     <option value={SubtitleStyleType.GAMING}>Gaming Yellow Neon</option>
                     <option value={SubtitleStyleType.ARABIC_PREMIUM}>Arabic Premium (RTL)</option>
+                    <option value={SubtitleStyleType.KARAOKE}>🎤 Karaoke Fill Sweep</option>
+                    <option value={SubtitleStyleType.WORD_POP}>💥 Word Pop (MrBeast)</option>
+                    <option value={SubtitleStyleType.TYPEWRITER}>⌨️ Typewriter Reveal</option>
                   </select>
                 </div>
 
@@ -1622,7 +2703,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                       <button
                         type="button"
                         onClick={() => setFontSize(Math.max(0, fontSize - 1))}
-                        className="px-1 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                        className="btn btn-ghost btn-xs"
                       >
                         -
                       </button>
@@ -1641,7 +2722,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                       <button
                         type="button"
                         onClick={() => setFontSize(Math.min(100, fontSize + 1))}
-                        className="px-1 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                        className="btn btn-ghost btn-xs"
                       >
                         +
                       </button>
@@ -1666,7 +2747,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                       <button
                         type="button"
                         onClick={() => setWordSpacing(Math.max(0, wordSpacing - 1))}
-                        className="px-1 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                        className="btn btn-ghost btn-xs"
                       >
                         -
                       </button>
@@ -1685,7 +2766,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                       <button
                         type="button"
                         onClick={() => setWordSpacing(Math.min(50, wordSpacing + 1))}
-                        className="px-1 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                        className="btn btn-ghost btn-xs"
                       >
                         +
                       </button>
@@ -1710,7 +2791,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                       <button
                         type="button"
                         onClick={() => setLetterSpacing(Math.max(0, letterSpacing - 1))}
-                        className="px-1 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                        className="btn btn-ghost btn-xs"
                       >
                         -
                       </button>
@@ -1729,7 +2810,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                       <button
                         type="button"
                         onClick={() => setLetterSpacing(Math.min(50, letterSpacing + 1))}
-                        className="px-1 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                        className="btn btn-ghost btn-xs"
                       >
                         +
                       </button>
@@ -1782,13 +2863,13 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
           <div className="bg-slate-900 border border-slate-800 p-3 sm:p-5 rounded-xl space-y-3 sm:space-y-4 ticks card-glow">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <span className="w-2 h-2 bg-[#2FD0C4] rounded-full shadow-[0_0_8px_#2FD0C4]"></span>
+                <span className="w-2 h-2 bg-[#E1306C] rounded-full shadow-[0_0_8px_#E1306C]"></span>
                 <span className="hud-label text-[10px]">Generated Script</span>
               </div>
               <button
                 onClick={handleCopyScript}
                 disabled={!getFullScript().trim()}
-                className="outline-btn text-[10px] font-bold px-3 py-1.5 disabled:opacity-30 disabled:cursor-not-allowed"
+                className="btn btn-outline btn-sm"
               >
                 <Copy className="w-3.5 h-3.5" />
                 {copyScriptSuccess ? (
@@ -1814,7 +2895,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
           {/* Audio Management Panel */}
           <div className="bg-slate-900 border border-slate-800 p-3 sm:p-5 rounded-xl space-y-3 sm:space-y-4 ticks card-glow">
             <div className="flex items-center gap-3">
-              <span className="w-2 h-2 bg-[#2FD0C4] rounded-full shadow-[0_0_8px_#2FD0C4]"></span>
+              <span className="w-2 h-2 bg-[#E1306C] rounded-full shadow-[0_0_8px_#E1306C]"></span>
               <span className="hud-label text-[10px]">Audio Studio</span>
             </div>
 
@@ -1830,7 +2911,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                 </span>
                 <button
                   onClick={() => handleTtsToggle(!ttsEnabled)}
-                  className={`relative w-8 h-4 rounded-full transition-colors cursor-pointer ${ttsEnabled ? "bg-[#2FD0C4]" : "bg-slate-700"}`}
+                  className={`relative w-8 h-4 rounded-full transition-colors cursor-pointer ${ttsEnabled ? "bg-[#E1306C]" : "bg-slate-700"}`}
                 >
                   <span className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-transform ${ttsEnabled ? "translate-x-4" : "translate-x-0.5"}`} />
                 </button>
@@ -1838,7 +2919,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
               {ttsEnabled && (
                 <div className="space-y-2">
                   <select value={ttsVoice} onChange={e => setTtsVoice(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 focus:border-[#2FD0C4] rounded-lg px-2 py-1.5 text-[10px] text-slate-200 outline-none cursor-pointer font-mono"
+                    className="w-full bg-slate-950 border border-slate-800 focus:border-[#E1306C] rounded-lg px-2 py-1.5 text-[10px] text-slate-200 outline-none cursor-pointer font-mono"
                   >
                     <optgroup label="Hindi">
                       <option value="hi-IN-SwaraNeural">Swara (Female)</option>
@@ -1863,6 +2944,20 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                       <option value="tr-TR-AhmetNeural">Ahmet (Male)</option>
                     </optgroup>
                   </select>
+                  {/* v16: Preview button — listen to the selected voice before generating */}
+                  <div className="flex items-center gap-2">
+                    <button onClick={handlePreviewVoice} disabled={isPreviewingVoice}
+                      className="flex-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 text-[9px] font-bold font-mono rounded-lg py-1.5 cursor-pointer disabled:opacity-50 transition-all flex items-center justify-center gap-1"
+                    >
+                      {isPreviewingVoice ? "Loading..." : "▶ Preview Voice"}
+                    </button>
+                    {voicePreviewUrl && (
+                      <audio ref={ttsVoicePreviewRef} src={voicePreviewUrl} controls
+                        className="flex-1 h-7 [&::-webkit-media-controls-panel]:bg-slate-900"
+                        style={{ maxWidth: "180px" }}
+                      />
+                    )}
+                  </div>
                   {/* Speed control */}
                   <div className="flex items-center gap-2">
                     <span className="text-[9px] font-mono text-slate-500 min-w-[28px] text-right">Slow</span>
@@ -1873,20 +2968,20 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                         setTtsRate(rateStr);
                         if (project) {
                           project.settings.edgeTtsRate = rateStr;
-                          fetch("/api/settings", {
-                            method: "POST",
+                          fetch(`/api/projects/${project.id}/settings`, {
+                            method: "PATCH",
                             headers: { "Content-Type": "application/json" },
                             body: JSON.stringify(project.settings)
                           });
                         }
                       }}
-                      className="w-full h-1.5 bg-slate-800 rounded-full appearance-none cursor-pointer accent-[#2FD0C4] [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-[#2FD0C4] [&::-webkit-slider-thumb]:shadow-[0_0_6px_#2FD0C4]"
+                      className="w-full h-1.5 bg-slate-800 rounded-full appearance-none cursor-pointer accent-[#E1306C] [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-[#E1306C] [&::-webkit-slider-thumb]:shadow-[0_0_6px_#E1306C]"
                     />
                     <span className="text-[9px] font-mono text-slate-500 min-w-[28px]">Fast</span>
-                    <span className="text-[9px] font-mono text-[#2FD0C4] min-w-[36px] text-right">{ttsRate}</span>
+                    <span className="text-[9px] font-mono text-[#E1306C] min-w-[36px] text-right">{ttsRate}</span>
                   </div>
                   <button onClick={handleGenerateTts} disabled={isGeneratingTts}
-                    className="w-full bg-gradient-to-r from-[#2FD0C4]/20 to-[#2FD0C4]/10 hover:from-[#2FD0C4]/30 hover:to-[#2FD0C4]/20 border border-[#2FD0C4]/30 text-[#2FD0C4] text-[9px] font-bold font-mono rounded-lg py-1.5 cursor-pointer disabled:opacity-50 transition-all"
+                    className="w-full bg-gradient-to-r from-[#E1306C]/20 to-[#E1306C]/10 hover:from-[#E1306C]/30 hover:to-[#E1306C]/20 border border-[#E1306C]/30 text-[#E1306C] text-[9px] font-bold font-mono rounded-lg py-1.5 cursor-pointer disabled:opacity-50 transition-all"
                   >
                     {isGeneratingTts ? `Generating...` : `Generate Voiceover (${ttsVoice.split("-").slice(2).join(" ")})`}
                   </button>
@@ -1901,10 +2996,10 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">Voiceover</span>
                 {audioVoiceover && (
                   <div className="flex items-center gap-1">
-                    <button onClick={() => handlePreviewAudio(audioVoiceover.url)} className="outline-btn !px-2 !py-0.5 !text-[9px]">
+                    <button onClick={() => handlePreviewAudio(audioVoiceover.url)} className="btn btn-outline btn-xs">
                       {audioPreviewId === audioVoiceover.url ? "Playing..." : "Play"}
                     </button>
-                    <button onClick={() => handleAudioRemove("voiceover")} className="outline-btn !px-2 !py-0.5 !text-[9px] !border-rose-500/30 !text-rose-400 hover:!border-rose-500">Remove</button>
+                    <button onClick={() => handleAudioRemove("voiceover")} className="btn btn-danger-soft btn-xs">Remove</button>
                   </div>
                 )}
               </div>
@@ -1916,18 +3011,18 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                     <span>{(audioVoiceover.duration || 0).toFixed(1)}s</span>
                   </div>
                   <div className="h-1.5 bg-slate-950 border border-slate-800 rounded-full overflow-hidden">
-                    <div className="h-full w-full bg-gradient-to-r from-[#2FD0C4]/30 to-[#2FD0C4]/60 rounded-full" />
+                    <div className="h-full w-full bg-gradient-to-r from-[#E1306C]/30 to-[#E1306C]/60 rounded-full" />
                   </div>
                 </div>
               ) : (
-                <label className="flex flex-col items-center justify-center border-2 border-dashed border-slate-800 rounded-lg p-3 cursor-pointer hover:border-[#2FD0C4]/40 transition-colors">
+                <label className="flex flex-col items-center justify-center border-2 border-dashed border-slate-800 rounded-lg p-3 cursor-pointer hover:border-[#E1306C]/40 transition-colors">
                   <input type="file" accept=".mp3,.wav" className="hidden" onChange={(e) => {
                     const f = e.target.files?.[0]; if (f) handleAudioUpload("voiceover", f);
                   }} />
                   <span className="text-[9px] font-mono text-slate-500 text-center leading-relaxed">
                     Tap to upload MP3/WAV<br />voiceover file
                   </span>
-                  {isUploadingAudio && <span className="text-[8px] text-[#2FD0C4] mt-1">Uploading...</span>}
+                  {isUploadingAudio && <span className="text-[8px] text-[#E1306C] mt-1">Uploading...</span>}
                 </label>
               )}
             </div>
@@ -1938,10 +3033,10 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">Background Music</span>
                 {audioBgm && (
                   <div className="flex items-center gap-1">
-                    <button onClick={() => handlePreviewAudio(audioBgm.url)} className="outline-btn !px-2 !py-0.5 !text-[9px]">
+                    <button onClick={() => handlePreviewAudio(audioBgm.url)} className="btn btn-outline btn-xs">
                       {audioPreviewId === audioBgm.url ? "Playing..." : "Play"}
                     </button>
-                    <button onClick={() => handleAudioRemove("bgm")} className="outline-btn !px-2 !py-0.5 !text-[9px] !border-rose-500/30 !text-rose-400 hover:!border-rose-500">Remove</button>
+                    <button onClick={() => handleAudioRemove("bgm")} className="btn btn-danger-soft btn-xs">Remove</button>
                   </div>
                 )}
               </div>
@@ -1949,7 +3044,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
               {audioBgm ? (
                 <div className="bg-slate-950 border border-slate-800 rounded-lg p-2.5 space-y-1.5">
                   <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
-                    <span className="truncate max-w-[120px]">{audioBgm.name}</span>
+                    <span className="truncate max-w-[120px]">{audioBgm.name || (audioBgm as any).fileName || "bgm"}</span>
                     <span>{(audioBgm.duration || 0).toFixed(1)}s</span>
                   </div>
                   <div className="h-1.5 bg-slate-950 border border-slate-800 rounded-full overflow-hidden">
@@ -1957,7 +3052,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                   </div>
                 </div>
               ) : (
-                <label className="flex flex-col items-center justify-center border-2 border-dashed border-slate-800 rounded-lg p-3 cursor-pointer hover:border-[#2FD0C4]/40 transition-colors">
+                <label className="flex flex-col items-center justify-center border-2 border-dashed border-slate-800 rounded-lg p-3 cursor-pointer hover:border-[#E1306C]/40 transition-colors">
                   <input type="file" accept=".mp3,.wav" className="hidden" onChange={(e) => {
                     const f = e.target.files?.[0]; if (f) handleAudioUpload("bgm", f);
                   }} />
@@ -1981,8 +3076,8 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                   setAutoSfxEnabled(newVal);
                   if (project) {
                     project.settings.autoSfxEnabled = newVal;
-                    await fetch("/api/settings", {
-                      method: "POST",
+                    await fetch(`/api/projects/${project.id}/settings`, {
+                      method: "PATCH",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify(project.settings)
                     });
@@ -1998,14 +3093,278 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
               </button>
             </div>
 
+            {/* ===== v14 CREATIVE SUITE ===== */}
+            <div className="bg-gradient-to-br from-slate-900/60 to-slate-950 border border-[#E1306C]/20 rounded-xl p-3 space-y-3">
+              <p className="text-[10px] font-bold text-[#E1306C] uppercase tracking-wider font-mono flex items-center gap-1.5">
+                ✨ Creative Suite <span className="text-slate-500 font-normal normal-case">(v14)</span>
+              </p>
+
+              {/* Video Template */}
+              <div>
+                <p className="text-[9px] text-slate-400 font-mono mb-1">🎬 Video Template</p>
+                <select
+                  value={videoTemplate}
+                  onChange={async (e) => { setVideoTemplate(e.target.value); await patchSetting("videoTemplate", e.target.value); }}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] text-slate-200 font-mono"
+                >
+                  <option value="none">None (manual)</option>
+                  <option value="mrbeast">🔥 MrBeast — vibrant, hype stickers, SFX</option>
+                  <option value="horror">👻 Horror — noir grade, suspense</option>
+                  <option value="motivational">💪 Motivational — cinematic, ducked music</option>
+                  <option value="documentary">🎥 Documentary — cool grade, minimal</option>
+                </select>
+              </div>
+
+              {/* Color Grade */}
+              <div>
+                <p className="text-[9px] text-slate-400 font-mono mb-1">🎨 Color Grading</p>
+                <select
+                  value={colorGrade}
+                  onChange={async (e) => { setColorGrade(e.target.value); await patchSetting("colorGrade", e.target.value); }}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] text-slate-200 font-mono"
+                >
+                  <option value="none">None</option>
+                  <option value="cinematic">Cinematic</option>
+                  <option value="warm">Warm</option>
+                  <option value="cool">Cool</option>
+                  <option value="vintage">Vintage</option>
+                  <option value="vibrant">Vibrant</option>
+                  <option value="noir">Noir (B&W)</option>
+                </select>
+              </div>
+
+              {/* Emoji Overlays */}
+              <div>
+                <p className="text-[9px] text-slate-400 font-mono mb-1">😜 Emoji Stickers</p>
+                <select
+                  value={emojiOverlays}
+                  onChange={async (e) => { setEmojiOverlays(e.target.value); await patchSetting("emojiOverlays", e.target.value); }}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] text-slate-200 font-mono"
+                >
+                  <option value="none">None</option>
+                  <option value="auto">Auto (keyword-matched)</option>
+                  <option value="hype">Hype (every scene)</option>
+                </select>
+              </div>
+
+              {/* Voice Effect */}
+              <div>
+                <p className="text-[9px] text-slate-400 font-mono mb-1">🎙️ Voice Changer (voiceover)</p>
+                <select
+                  value={voiceEffect}
+                  onChange={async (e) => { setVoiceEffect(e.target.value); await patchSetting("voiceEffect", e.target.value); }}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] text-slate-200 font-mono"
+                >
+                  <option value="none">None (original)</option>
+                  <option value="deep">Deep</option>
+                  <option value="chipmunk">Chipmunk</option>
+                  <option value="robot">Robot</option>
+                  <option value="echo">Echo</option>
+                  <option value="radio">Radio</option>
+                </select>
+              </div>
+
+              {/* Toggles row */}
+              <div className="space-y-2">
+                {[
+                  { label: "🔇 Auto Silence Removal", desc: "Cut silent gaps from voiceover", val: silenceRemoval, key: "silenceRemoval", set: setSilenceRemoval },
+                  { label: "📐 Footage Quality Filter", desc: "Auto-swap low-res clips for HD", val: qualityFilter, key: "footageQualityFilter", set: setQualityFilter },
+                  { label: "🥁 Beat-Sync Cuts", desc: "Snap scene cuts to BGM beats", val: beatSync, key: "beatSyncEnabled", set: setBeatSync },
+                ].map(t => (
+                  <div key={t.key} className="flex items-center justify-between">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[9px] font-semibold text-slate-300 font-mono">{t.label}</p>
+                      <p className="text-[8px] text-slate-500">{t.desc}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={async () => { const nv = !t.val; t.set(nv); await patchSetting(t.key, nv); }}
+                      className={`w-9 h-5 rounded-full transition-all relative flex-shrink-0 ${t.val ? "bg-[#E1306C]" : "bg-slate-800"}`}
+                    >
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-all ${t.val ? "translate-x-4" : "translate-x-0"}`} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* ===== v14 SCRIPT REWRITER ===== */}
+            <div className="bg-slate-900/40 border border-slate-800/60 rounded-xl p-3 space-y-2">
+              <p className="text-[10px] font-bold text-slate-300 uppercase tracking-wider font-mono">✍️ AI Script Rewriter</p>
+              <div className="flex gap-1.5">
+                <select
+                  value={rewriteStyle}
+                  onChange={(e) => setRewriteStyle(e.target.value)}
+                  className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] text-slate-200 font-mono"
+                >
+                  <option value="viral">Viral (MrBeast hooks)</option>
+                  <option value="storytelling">Storytelling</option>
+                  <option value="educational">Educational</option>
+                  <option value="dramatic">Dramatic</option>
+                </select>
+                <button
+                  onClick={handleRewriteScript}
+                  disabled={rewriting}
+                  className="btn btn-primary btn-sm whitespace-nowrap"
+                >
+                  {rewriting ? "Rewriting..." : "Rewrite"}
+                </button>
+              </div>
+              {rewriteError && <p className="text-[9px] text-red-400">{rewriteError}</p>}
+              {rewriteResult && (
+                <div className="space-y-2 bg-slate-950 border border-slate-800 rounded-lg p-2">
+                  <p className="text-[9px] text-[#E1306C] font-mono font-bold">Hook: {rewriteResult.hook}</p>
+                  <p className="text-[9px] text-slate-300 whitespace-pre-wrap max-h-32 overflow-y-auto">{rewriteResult.rewrittenScript}</p>
+                  {rewriteResult.changes.length > 0 && (
+                    <ul className="text-[8px] text-slate-500 list-disc pl-3">
+                      {rewriteResult.changes.map((c, i) => <li key={i}>{c}</li>)}
+                    </ul>
+                  )}
+                  <div className="flex gap-1.5">
+                    <button onClick={applyRewrittenScript} className="btn btn-primary btn-sm flex-1">Apply to Scenes</button>
+                    <button onClick={() => setRewriteResult(null)} className="btn btn-secondary btn-sm">Discard</button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* ===== v14 STOCK MUSIC SEARCH ===== */}
+            <div className="bg-slate-900/40 border border-slate-800/60 rounded-xl p-3 space-y-2">
+              <p className="text-[10px] font-bold text-slate-300 uppercase tracking-wider font-mono">🎵 Stock Music (by mood)</p>
+              <div className="flex gap-1.5">
+                <input
+                  value={stockMood}
+                  onChange={(e) => setStockMood(e.target.value)}
+                  placeholder="e.g. epic, chill, horror..."
+                  className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-[10px] text-slate-200 font-mono"
+                />
+                <button onClick={searchStockMusic} disabled={stockSearching} className="btn btn-primary btn-sm whitespace-nowrap">
+                  {stockSearching ? "Searching..." : "Search"}
+                </button>
+              </div>
+              {stockTracks.length > 0 && (
+                <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                  {stockTracks.map(t => (
+                    <div key={t.id} className="flex items-center justify-between bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5">
+                      <div className="flex-1 min-w-0 mr-2">
+                        <p className="text-[9px] text-slate-200 truncate">{t.title}</p>
+                        <p className="text-[8px] text-slate-500">{t.artist} · {Math.round(t.duration / 60)}:{String(Math.round(t.duration % 60)).padStart(2, "0")}</p>
+                      </div>
+                      <button
+                        onClick={() => useStockTrack(t)}
+                        disabled={stockDownloading === t.id}
+                        className="btn btn-secondary btn-sm whitespace-nowrap"
+                      >
+                        {stockDownloading === t.id ? "Adding..." : "Use as BGM"}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Auto TikTok Source Toggle */}
+            <div className="flex items-center justify-between bg-slate-900/40 rounded-xl px-3 py-2.5 border border-slate-800/60">
+              <div className="flex-1 min-w-0">
+                <p className="text-[10px] font-semibold text-slate-200 font-mono">🔍 Auto TikTok Source</p>
+                <p className="text-[8px] text-slate-500 mt-0.5">Search TikTok for each scene&apos;s keywords automatically</p>
+              </div>
+              <button
+                type="button"
+                onClick={async () => {
+                  const newVal = !autoTikTokSource;
+                  setAutoTikTokSource(newVal);
+                  if (project) {
+                    project.settings.autoTikTokSource = newVal;
+                    await fetch(`/api/projects/${project.id}/settings`, {
+                      method: "PATCH",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify(project.settings)
+                    });
+                  }
+                }}
+                className={`w-9 h-5 rounded-full transition-all relative flex-shrink-0 ${
+                  autoTikTokSource ? "bg-indigo-600" : "bg-slate-800"
+                }`}
+              >
+                <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-all ${
+                  autoTikTokSource ? "translate-x-4" : "translate-x-0"
+                }`} />
+              </button>
+            </div>
+
+            {/* Blur TikTok Watermark Toggle + Position Controls */}
+            <div className="bg-slate-900/40 rounded-xl px-3 py-2.5 border border-slate-800/60 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <div className="flex-1 min-w-0">
+                  <p className="text-[10px] font-semibold text-slate-200 font-mono">🌫️ Blur Watermark Region</p>
+                  <p className="text-[8px] text-slate-500 mt-0.5">Blurs a custom area (x,y,width,height) on all clips</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const newVal = !blurTikTokWatermark;
+                    setBlurTikTokWatermark(newVal);
+                    if (project) {
+                      project.settings.blurTikTokWatermark = newVal;
+                      await fetch(`/api/projects/${project.id}/settings`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(project.settings)
+                      });
+                    }
+                  }}
+                  className={`w-9 h-5 rounded-full transition-all relative flex-shrink-0 ${
+                    blurTikTokWatermark ? "bg-indigo-600" : "bg-slate-800"
+                  }`}
+                >
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-all ${
+                    blurTikTokWatermark ? "translate-x-4" : "translate-x-0"
+                  }`} />
+                </button>
+              </div>
+              {blurTikTokWatermark && (
+                <div className="grid grid-cols-4 gap-1.5">
+                  <div>
+                    <p className="text-[7px] text-slate-500 font-mono mb-1">X</p>
+                    <input type="number" min={0} max={1080}
+                      value={blurX}
+                      onChange={(e) => { const v = parseInt(e.target.value) || 0; setBlurX(v); if (project) { project.settings.blurX = v; fetch(`/api/projects/${project.id}/settings`, { method: "PATCH", headers: {"Content-Type":"application/json"}, body: JSON.stringify(project.settings) }); } }}
+                      className="w-full bg-slate-800/60 border border-slate-700/60 rounded-lg px-1.5 py-1 text-[9px] text-slate-200 font-mono outline-none text-center" />
+                  </div>
+                  <div>
+                    <p className="text-[7px] text-slate-500 font-mono mb-1">Y</p>
+                    <input type="number" min={0} max={1920}
+                      value={blurY}
+                      onChange={(e) => { const v = parseInt(e.target.value) || 0; setBlurY(v); if (project) { project.settings.blurY = v; fetch(`/api/projects/${project.id}/settings`, { method: "PATCH", headers: {"Content-Type":"application/json"}, body: JSON.stringify(project.settings) }); } }}
+                      className="w-full bg-slate-800/60 border border-slate-700/60 rounded-lg px-1.5 py-1 text-[9px] text-slate-200 font-mono outline-none text-center" />
+                  </div>
+                  <div>
+                    <p className="text-[7px] text-slate-500 font-mono mb-1">W</p>
+                    <input type="number" min={1} max={1080}
+                      value={blurW}
+                      onChange={(e) => { const v = parseInt(e.target.value) || 50; setBlurW(v); if (project) { project.settings.blurW = v; fetch(`/api/projects/${project.id}/settings`, { method: "PATCH", headers: {"Content-Type":"application/json"}, body: JSON.stringify(project.settings) }); } }}
+                      className="w-full bg-slate-800/60 border border-slate-700/60 rounded-lg px-1.5 py-1 text-[9px] text-slate-200 font-mono outline-none text-center" />
+                  </div>
+                  <div>
+                    <p className="text-[7px] text-slate-500 font-mono mb-1">H</p>
+                    <input type="number" min={1} max={1920}
+                      value={blurH}
+                      onChange={(e) => { const v = parseInt(e.target.value) || 50; setBlurH(v); if (project) { project.settings.blurH = v; fetch(`/api/projects/${project.id}/settings`, { method: "PATCH", headers: {"Content-Type":"application/json"}, body: JSON.stringify(project.settings) }); } }}
+                      className="w-full bg-slate-800/60 border border-slate-700/60 rounded-lg px-1.5 py-1 text-[9px] text-slate-200 font-mono outline-none text-center" />
+                  </div>
+                </div>
+              )}
+            </div>
+
             {/* BGM Library & SFX Browser Buttons */}
             <div className="grid grid-cols-2 gap-2">
               <button onClick={handleOpenBgmLibrary}
-                className="outline-btn !py-1.5 !text-[9px] text-[10px] flex items-center justify-center gap-1">
+                className="btn btn-outline btn-xs w-full">
                 <span className="text-sm">🎵</span> BGM Library
               </button>
               <button onClick={handleOpenSfxBrowser}
-                className="outline-btn !py-1.5 !text-[9px] text-[10px] flex items-center justify-center gap-1">
+                className="btn btn-outline btn-xs w-full">
                 <span className="text-sm">🔊</span> SFX Browser
               </button>
             </div>
@@ -2017,11 +3376,11 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                   <div className="space-y-1">
                     <div className="flex justify-between text-[9px] font-mono">
                       <span className="text-slate-400">Voice Volume</span>
-                      <span className="text-[#2FD0C4]">{voiceVolume}%</span>
+                      <span className="text-[#E1306C]">{voiceVolume}%</span>
                     </div>
                     <input type="range" min={0} max={200} value={voiceVolume}
                       onChange={(e) => setVoiceVolume(Number(e.target.value))}
-                      className="w-full accent-[#2FD0C4] bg-slate-950 h-1 rounded-full cursor-pointer" />
+                      className="w-full accent-[#E1306C] bg-slate-950 h-1 rounded-full cursor-pointer" />
                   </div>
                 )}
                 {audioBgm && (
@@ -2043,7 +3402,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                       { id: "fade_out", label: "Fade Out" }, { id: "fade_both", label: "Fade I+O" }].map(m => (
                       <button key={m.id} onClick={() => setBgmMode(m.id)}
                         className={`text-[8px] font-mono font-bold py-1 rounded border transition-colors cursor-pointer ${
-                          bgmMode === m.id ? "border-[#2FD0C4]/50 bg-[#2FD0C4]/10 text-[#2FD0C4]" : "border-slate-800 text-slate-500 hover:text-slate-300"
+                          bgmMode === m.id ? "border-[#E1306C]/50 bg-[#E1306C]/10 text-[#E1306C]" : "border-slate-800 text-slate-500 hover:text-slate-300"
                         }`}>
                         {m.label}
                       </button>
@@ -2054,11 +3413,11 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                 {/* Auto Sync + Save */}
                 <div className="flex items-center gap-1.5 pt-1">
                   {audioVoiceover && (
-                    <button onClick={handleAudioSync} className="outline-btn !px-2 !py-1 !text-[9px] text-[10px]">
+                    <button onClick={handleAudioSync} className="btn btn-outline btn-xs">
                       ↻ Auto Sync Scenes
                     </button>
                   )}
-                  <button onClick={handleSaveAudioSettings} className="outline-btn !px-2 !py-1 !text-[9px] text-[10px] ml-auto">
+                  <button onClick={handleSaveAudioSettings} className="btn btn-outline btn-xs ml-auto">
                       Save Audio Settings
                   </button>
                 </div>
@@ -2068,10 +3427,139 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
             {audioError && <div className="text-[9px] text-rose-400 font-mono">{audioError}</div>}
           </div>
 
+          {/* v13 Render Studio — aspect / watermark / CTA / Ken Burns / ducking / AI thumbnail */}
+          <div className="bg-slate-900 border border-slate-800 p-3 sm:p-5 rounded-xl space-y-3 sm:space-y-4 ticks">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <span className="w-2 h-2 bg-indigo-400 rounded-full shadow-[0_0_8px_#F56040]"></span>
+                <span className="hud-label text-[10px]">Render Studio</span>
+              </div>
+              <Wand2 className="w-3.5 h-3.5 text-indigo-400" />
+            </div>
+
+            {/* Aspect Ratio */}
+            <div className="space-y-1.5">
+              <span className="text-[9px] font-mono text-slate-500 uppercase font-bold tracking-wider">Aspect Ratio</span>
+              <div className="grid grid-cols-3 gap-1">
+                {(["9:16", "1:1", "16:9"] as const).map(r => (
+                  <button key={r} onClick={() => updateSettings({ aspectRatio: r })}
+                    className={`text-[9px] font-mono font-bold py-1.5 rounded border transition-colors cursor-pointer ${
+                      (project?.settings.aspectRatio || "9:16") === r
+                        ? "border-indigo-500/60 bg-indigo-600/15 text-indigo-300"
+                        : "border-slate-800 text-slate-500 hover:text-slate-300"
+                    }`}>
+                    {r}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Ken Burns + Ducking + AI Thumbnail toggles */}
+            {([
+              { key: "kenBurnsEnabled", label: "Ken Burns Zoom", desc: "Slow zoom on image scenes", default: true },
+              { key: "duckingEnabled", label: "Music Ducking", desc: "Lower BGM during voiceover", default: true },
+              { key: "aiThumbnail", label: "Thumbnail Title", desc: "Overlay title text on thumbnail", default: true }
+            ] as const).map(t => (
+              <div key={t.key} className="flex items-center justify-between gap-2">
+                <div className="flex-1 min-w-0">
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">{t.label}</label>
+                  <p className="text-[8px] text-slate-500 mt-0.5">{t.desc}</p>
+                </div>
+                <button onClick={() => updateSettings({ [t.key]: !(project?.settings[t.key] ?? t.default) } as any)}
+                  className={`relative w-8 h-4 rounded-full transition-colors cursor-pointer shrink-0 ${(project?.settings[t.key] ?? t.default) ? "bg-indigo-500" : "bg-slate-700"}`}>
+                  <span className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-transform ${(project?.settings[t.key] ?? t.default) ? "translate-x-4" : "translate-x-0.5"}`} />
+                </button>
+              </div>
+            ))}
+
+            {/* Watermark */}
+            <div className="space-y-2 border-t border-slate-800 pt-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[9px] font-mono text-slate-500 uppercase font-bold tracking-wider">Watermark Logo</span>
+                <button onClick={() => updateSettings({ watermarkEnabled: !project?.settings.watermarkEnabled })}
+                  className={`relative w-8 h-4 rounded-full transition-colors cursor-pointer ${project?.settings.watermarkEnabled ? "bg-indigo-500" : "bg-slate-700"}`}>
+                  <span className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-transform ${project?.settings.watermarkEnabled ? "translate-x-4" : "translate-x-0.5"}`} />
+                </button>
+              </div>
+              {project?.settings.watermarkUrl && (
+                <div className="flex items-center gap-2 bg-slate-950 border border-slate-800 rounded-lg p-1.5">
+                  <img src={project.settings.watermarkUrl} alt="watermark" className="w-8 h-8 object-contain bg-white rounded" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                  <span className="text-[9px] font-mono text-slate-400 truncate flex-1">{project.settings.watermarkUrl.split("/").pop()}</span>
+                  <button onClick={() => updateSettings({ watermarkEnabled: false, watermarkUrl: undefined })} className="text-[9px] text-rose-400 hover:text-rose-300 font-mono cursor-pointer">Remove</button>
+                </div>
+              )}
+              <label className="flex flex-col items-center justify-center border border-dashed border-slate-800 rounded-lg p-2.5 cursor-pointer hover:border-indigo-500/40 transition-colors">
+                <input type="file" accept=".png,.jpg,.jpeg,.webp,.svg" className="hidden"
+                  onChange={(e) => { const f = e.target.files?.[0]; if (f) handleWatermarkUpload(f); e.target.value = ""; }} />
+                <span className="text-[9px] font-mono text-slate-500">Upload logo (PNG/JPG/SVG)</span>
+              </label>
+              {project?.settings.watermarkEnabled && (
+                <div className="grid grid-cols-2 gap-2">
+                  <select value={project.settings.watermarkPosition || "br"}
+                    onChange={(e) => updateSettings({ watermarkPosition: e.target.value as any })}
+                    className="bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[9px] text-slate-300 font-mono outline-none cursor-pointer">
+                    <option value="tl">Top Left</option>
+                    <option value="tr">Top Right</option>
+                    <option value="bl">Bottom Left</option>
+                    <option value="br">Bottom Right</option>
+                  </select>
+                  <input type="number" min={10} max={30} value={project.settings.watermarkSize || 15}
+                    onChange={(e) => updateSettings({ watermarkSize: Math.max(10, Math.min(30, parseInt(e.target.value) || 15)) })}
+                    className="bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[9px] text-slate-300 font-mono outline-none"
+                    title="Size (% of video width)" />
+                </div>
+              )}
+            </div>
+
+            {/* CTA End Card */}
+            <div className="space-y-2 border-t border-slate-800 pt-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[9px] font-mono text-slate-500 uppercase font-bold tracking-wider">CTA End Card</span>
+                <button onClick={() => updateSettings({ ctaEnabled: !project?.settings.ctaEnabled })}
+                  className={`relative w-8 h-4 rounded-full transition-colors cursor-pointer ${project?.settings.ctaEnabled ? "bg-indigo-500" : "bg-slate-700"}`}>
+                  <span className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-transform ${project?.settings.ctaEnabled ? "translate-x-4" : "translate-x-0.5"}`} />
+                </button>
+              </div>
+              {project?.settings.ctaEnabled && (
+                <input
+                  value={project.settings.ctaText || ""}
+                  onChange={(e) => updateSettings({ ctaText: e.target.value })}
+                  placeholder="e.g. Subscribe for more! 🔔"
+                  className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-lg px-2.5 py-1.5 text-[10px] text-slate-200 outline-none"
+                />
+              )}
+            </div>
+          </div>
+
+          {/* Render Template Presets — one-click bundles */}
+          <div className="bg-slate-900 border border-slate-800 p-3 sm:p-5 rounded-xl space-y-2 ticks">
+            <div className="flex items-center gap-3">
+              <span className="w-2 h-2 bg-amber-400 rounded-full shadow-[0_0_8px_#FBBF24]"></span>
+              <span className="hud-label text-[10px]">Template Presets</span>
+            </div>
+            <div className="grid grid-cols-1 gap-1.5">
+              {TEMPLATE_PRESETS.map(p => (
+                <button key={p.id} onClick={() => applyTemplatePreset(p.id)}
+                  className={`flex items-center gap-2.5 px-3 py-2 rounded-lg border transition-all cursor-pointer text-left ${
+                    project?.settings.templatePreset === p.id
+                      ? "border-amber-500/50 bg-amber-500/10"
+                      : "border-slate-800 bg-slate-950 hover:border-amber-500/30"
+                  }`}>
+                  <span className="text-base leading-none">{p.emoji}</span>
+                  <span className="flex-1 min-w-0">
+                    <span className="block text-[10px] font-bold text-slate-200">{p.name}</span>
+                    <span className="block text-[8px] text-slate-500 font-mono truncate">{p.desc}</span>
+                  </span>
+                  {project?.settings.templatePreset === p.id && <span className="text-[9px] text-amber-400 font-mono">ACTIVE</span>}
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Main Action card depending on Status */}
           <div className="bg-slate-900 border border-slate-800 p-3 sm:p-5 rounded-xl space-y-3 sm:space-y-4 ticks card-glow">
             <div className="flex items-center gap-3">
-              <span className="w-2 h-2 bg-[#2FD0C4] rounded-full shadow-[0_0_8px_#2FD0C4]"></span>
+              <span className="w-2 h-2 bg-[#E1306C] rounded-full shadow-[0_0_8px_#E1306C]"></span>
               <span className="hud-label text-[10px]">Render Pipeline</span>
             </div>
 
@@ -2083,7 +3571,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                 <button
                   id="btn_trigger_render"
                   onClick={handleTriggerRender}
-                  className="outline-btn w-full justify-center text-[11px] font-semibold"
+                  className="btn btn-outline btn-sm w-full"
                 >
                   <RefreshCw className="w-4 h-4 animate-spin-slow" />
                   Render Final Short MP4
@@ -2101,11 +3589,24 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                 </div>
                 {/* Visual Progress Bar */}
                 <div className="w-full h-2 bg-slate-950 rounded-full overflow-hidden border border-slate-800">
-                  <div 
-                    className="bg-indigo-600 h-full rounded-full transition-all duration-500" 
+                  <div
+                    className="bg-indigo-600 h-full rounded-full transition-all duration-500"
                     style={{ width: `${job?.progress || 10}%` }}
                   ></div>
                 </div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (confirm("Cancel rendering? Any progress will be lost.")) {
+                      try {
+                        await fetch(`/api/projects/${projectId}/render/cancel`, { method: "POST" });
+                      } catch {}
+                    }
+                  }}
+                  className="btn btn-danger btn-sm w-full"
+                >
+                  <span className="text-xs">✕</span> Cancel Rendering
+                </button>
                 <div className="flex items-center gap-2 p-2.5 bg-slate-950 rounded-xl border border-slate-800/60 text-[10px] text-slate-400 font-mono">
                   <span className="w-2 h-2 rounded-full bg-indigo-400 block animate-ping"></span>
                   <span>Active Step: {job?.step.toUpperCase()}</span>
@@ -2184,7 +3685,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                       setIsFullScreenPlaying(true);
                       setIsFullScreenOpen(true);
                     }}
-                    className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold transition-colors shadow-lg shadow-indigo-600/25 cursor-pointer flex items-center justify-center gap-2"
+                    className="btn btn-primary w-full"
                   >
                     <Play className="w-4 h-4 fill-white" />
                     Watch Fullscreen Playback
@@ -2201,7 +3702,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                     </a>
                     <button
                       onClick={handleTriggerRender}
-                      className="flex-1 py-2.5 bg-amber-600 hover:bg-amber-500 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer flex items-center justify-center gap-2"
+                      className="btn btn-primary flex-1"
                     >
                       Re-render
                     </button>
@@ -2210,16 +3711,25 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                   <button
                     onClick={handleGenerateSEO}
                     disabled={isGeneratingSEO}
-                    className="outline-btn w-full justify-center text-[11px] font-bold"
+                    className="btn btn-outline btn-sm w-full"
                   >
                     <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
                     {isGeneratingSEO ? "Generating SEO Ideas..." : "AI SEO & Tags Generator"}
                   </button>
 
                   <button
+                    onClick={handleGenerateABTitles}
+                    disabled={isGeneratingAB}
+                    className="btn btn-outline btn-sm w-full"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                    {isGeneratingAB ? "Generating A/B Titles..." : "A/B Title Generator (CTR Test)"}
+                  </button>
+
+                  <button
                     onClick={handleGenerateThumbnail}
                     disabled={isGeneratingThumbnail}
-                    className="w-full py-2.5 bg-slate-950 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800 hover:border-slate-700 rounded-xl text-xs font-semibold transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                    className="w-full py-2.5 bg-slate-950 hover:bg-slate-800 text-slate-300 hover:text-ink border border-slate-800 hover:border-slate-700 rounded-xl text-xs font-semibold transition-all cursor-pointer flex items-center justify-center gap-1.5"
                   >
                     <Image className="w-3.5 h-3.5" />
                     {isGeneratingThumbnail ? "Generating Thumbnail..." : thumbnailUrl ? "✓ Thumbnail Ready" : "Generate YouTube Thumbnail"}
@@ -2241,11 +3751,30 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                     </div>
                   )}
 
+                  {/* Channel selector — shown when more than one channel is connected */}
+                  {ytAccounts.length > 1 && !youtubeResult && (
+                    <div className="mb-1.5">
+                      <label className="text-[10px] text-slate-500 block mb-1">Upload to channel:</label>
+                      <select
+                        value={selectedAccountId}
+                        onChange={e => setSelectedAccountId(e.target.value)}
+                        disabled={isYoutubeUploading}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-600"
+                      >
+                        {ytAccounts.map(acc => (
+                          <option key={acc.id} value={acc.id}>
+                            {acc.channelTitle}{acc.isDefault ? " (default)" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
                   {/* YouTube Upload Button */}
                   <button
                     onClick={handleYoutubeUpload}
                     disabled={isYoutubeUploading}
-                    className="outline-btn w-full justify-center text-[11px] font-bold"
+                    className="btn btn-outline btn-sm w-full"
                   >
                     {isYoutubeUploading ? (
                       <>Uploading to YouTube...</>
@@ -2259,10 +3788,21 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                     )}
                   </button>
                   {youtubeResult && (
-                    <a href={youtubeResult.url} target="_blank" rel="noopener noreferrer"
-                      className="text-[10px] text-[#2FD0C4] font-mono text-center block hover:underline truncate">
-                      {youtubeResult.url}
-                    </a>
+                    youtubeResult.url ? (
+                      <a href={youtubeResult.url} target="_blank" rel="noopener noreferrer"
+                        className="text-[10px] text-[#E1306C] font-mono text-center block hover:underline truncate">
+                        {youtubeResult.url}
+                      </a>
+                    ) : (
+                      <div className="text-[10px] text-green-400 bg-green-950/30 border border-green-900/50 rounded px-2 py-1.5 mt-1">
+                        ✓ {youtubeResult.note || "Video uploaded to YouTube. Check YouTube Studio for the link."}
+                      </div>
+                    )
+                  )}
+                  {youtubeError && (
+                    <div className="text-[10px] text-red-400 bg-red-950/30 border border-red-900/50 rounded px-2 py-1.5 mt-1">
+                      ⚠ {youtubeError}
+                    </div>
                   )}
 
                   {/* Schedule UI */}
@@ -2271,7 +3811,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                       {scheduledInfo ? (
                         <div className="flex items-center justify-between">
                           <span className="text-[10px] text-slate-400">
-                            Scheduled: {new Date(scheduledInfo.scheduledAt).toLocaleString()}
+                            Scheduled: {new Date(scheduledInfo.scheduledAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", dateStyle: "medium", timeStyle: "short" })} IST
                             <span className={`ml-2 ${scheduledInfo.status === "done" ? "text-green-400" : scheduledInfo.status === "failed" ? "text-red-400" : "text-yellow-400"}`}>
                               ({scheduledInfo.status})
                             </span>
@@ -2285,7 +3825,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                           <input type="time" value={scheduleTime} onChange={e => setScheduleTime(e.target.value)}
                             className="w-20 bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[10px] text-slate-200 outline-none" />
                           <button onClick={handleSchedule} disabled={isScheduling || !scheduleDate || !scheduleTime}
-                            className="text-[10px] bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 text-white px-2 py-1 rounded cursor-pointer whitespace-nowrap">
+                            className="btn btn-primary btn-xs whitespace-nowrap">
                             {isScheduling ? "..." : "Schedule"}
                           </button>
                         </div>
@@ -2306,7 +3846,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                 </div>
                 <button
                   onClick={handleTriggerRender}
-                  className="w-full py-3 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer flex items-center justify-center gap-2"
+                  className="btn btn-danger w-full"
                 >
                   <RefreshCw className="w-4 h-4" />
                   Retry Compilation
@@ -2376,6 +3916,82 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
             </div>
           )}
 
+          {/* v16: A/B Title Generator results */}
+          {abError && (
+            <div className="bg-red-500/10 border border-red-500/30 p-3 rounded-xl text-red-400 text-xs animate-fade-in text-left">
+              {abError}
+            </div>
+          )}
+          {abResult && (
+            <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl space-y-4 animate-fade-in text-left">
+              <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider font-mono border-b border-slate-800 pb-2 flex items-center justify-between">
+                <span className="flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                  A/B Title Lab — Predicted CTR
+                </span>
+                <button
+                  onClick={() => setAbResult(null)}
+                  className="text-slate-500 hover:text-slate-300 text-[10px] uppercase font-bold cursor-pointer"
+                >
+                  Hide
+                </button>
+              </h4>
+
+              <div className="space-y-2.5">
+                {abResult.variants.map((v, i) => {
+                  const isWinner = i === abResult.winner;
+                  return (
+                    <div
+                      key={i}
+                      className={`rounded-xl border p-3 space-y-2 ${
+                        isWinner
+                          ? "border-amber-500/50 bg-amber-500/5"
+                          : "border-slate-800 bg-slate-950"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className={`text-[9px] font-mono uppercase font-bold px-1.5 py-0.5 rounded ${
+                          isWinner ? "bg-amber-500/20 text-amber-400" : "bg-slate-800 text-slate-400"
+                        }`}>
+                          {isWinner ? "🏆 Winner" : `Variant ${String.fromCharCode(65 + i)}`} · {v.angle}
+                        </span>
+                        <span className={`text-sm font-bold font-mono ${
+                          v.ctrScore >= 70 ? "text-green-400" : v.ctrScore >= 50 ? "text-amber-400" : "text-slate-400"
+                        }`}>
+                          {v.ctrScore}<span className="text-[9px] text-slate-500">/100 CTR</span>
+                        </span>
+                      </div>
+                      <p className="text-xs font-semibold text-slate-200 leading-relaxed">{v.title}</p>
+                      <p className="text-[10px] text-slate-500 italic">{v.reasoning}</p>
+                      <div className="flex gap-1.5">
+                        <button
+                          onClick={() => copyToClipboard(v.title, `ab-${i}`)}
+                          className="text-[10px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1 cursor-pointer"
+                        >
+                          {copiedField === `ab-${i}` ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                          Copy
+                        </button>
+                        <button
+                          onClick={() => handleApplyABTitle(v.title)}
+                          className="text-[10px] text-amber-400 hover:text-amber-300 cursor-pointer"
+                        >
+                          Apply as Title
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="bg-slate-950 border border-slate-800/60 rounded-lg p-2.5">
+                <p className="text-[10px] text-slate-400">
+                  <span className="text-amber-400 font-bold uppercase font-mono">Insight: </span>
+                  {abResult.insight}
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* System Compiler Logs Terminal panel */}
           <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden flex flex-col h-64">
             <div className="bg-slate-950 px-4 py-2.5 border-b border-slate-800/80 flex items-center justify-between shrink-0">
@@ -2383,9 +3999,25 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                 <Terminal className="w-3.5 h-3.5 text-slate-400" />
                 FFmpeg Compiler Output Logs
               </span>
-              <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse block"></span>
+              <div className="flex items-center gap-2">
+                {job?.step === "rendering" && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (confirm("Cancel rendering? Any progress will be lost.")) {
+                        try {
+                          await fetch(`/api/projects/${projectId}/render/cancel`, { method: "POST" });
+                        } catch {}
+                      }
+                    }}
+                    className="btn btn-danger btn-xs"
+                  >
+                    <span className="text-xs">✕</span> Cancel
+                  </button>
+                )}
+                <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse block"></span>
+              </div>
             </div>
-            
             <div className="flex-1 p-4 overflow-y-auto bg-slate-950 font-mono text-[10px] text-slate-300 leading-normal space-y-1 text-left select-text">
               {job?.logOutput && job.logOutput.length > 0 ? (
                 job.logOutput.map((log, idx) => (
@@ -2416,7 +4048,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
             <div className="flex items-center gap-3">
               <span className="w-2.5 h-2.5 bg-indigo-500 rounded-full animate-pulse"></span>
               <div className="text-left">
-                <h3 className="font-display font-bold text-sm sm:text-base text-white tracking-tight">
+                <h3 className="font-display font-bold text-sm sm:text-base text-ink tracking-tight">
                   {project.title}
                 </h3>
                 <p className="text-[10px] text-slate-400 font-mono mt-0.5">
@@ -2459,7 +4091,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
 
             <button
               onClick={() => setIsFullScreenOpen(false)}
-              className="p-2 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white rounded-xl transition-all cursor-pointer flex items-center justify-center"
+              className="btn btn-secondary btn-icon"
               title="Close Fullscreen (Esc)"
             >
               <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2607,7 +4239,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                 )}
 
                 {/* TikTok / Shorts UI Overlays for aesthetic immersion */}
-                <div className="absolute right-4 bottom-28 z-10 flex flex-col items-center gap-5 text-white pointer-events-auto">
+                <div className="absolute right-4 bottom-28 z-10 flex flex-col items-center gap-5 text-ink pointer-events-auto">
                   <div className="flex flex-col items-center cursor-pointer hover:scale-105 transition-transform">
                     <div className="w-10 h-10 rounded-full bg-black/50 backdrop-blur-sm border border-slate-800 flex items-center justify-center">
                       <svg className="w-5 h-5 text-white fill-white" viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
@@ -2622,7 +4254,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                   </div>
                   <div className="flex flex-col items-center cursor-pointer hover:scale-105 transition-transform">
                     <div className="w-10 h-10 rounded-full bg-black/50 backdrop-blur-sm border border-slate-800 flex items-center justify-center">
-                      <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M8.684 10.742l3.415-1.708m0 4.928l3.414-1.708m-1.707-1.707a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0zm6.828-4.928a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0zm-13.656 9.856a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0z"/></svg>
+                      <svg className="w-5 h-5 text-ink" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M8.684 10.742l3.415-1.708m0 4.928l3.414-1.708m-1.707-1.707a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0zm6.828-4.928a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0zm-13.656 9.856a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0z"/></svg>
                     </div>
                     <span className="text-[10px] font-mono font-bold mt-1 text-slate-300">Share</span>
                   </div>
@@ -2696,7 +4328,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                             <button
                               type="button"
                               onClick={() => setFontSize(Math.max(0, fontSize - 1))}
-                              className="px-1 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                              className="btn btn-ghost btn-xs"
                             >
                               -
                             </button>
@@ -2715,7 +4347,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                             <button
                               type="button"
                               onClick={() => setFontSize(Math.min(100, fontSize + 1))}
-                              className="px-1 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                              className="btn btn-ghost btn-xs"
                             >
                               +
                             </button>
@@ -2740,7 +4372,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                             <button
                               type="button"
                               onClick={() => setWordSpacing(Math.max(0, wordSpacing - 1))}
-                              className="px-1 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                              className="btn btn-ghost btn-xs"
                             >
                               -
                             </button>
@@ -2759,7 +4391,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                             <button
                               type="button"
                               onClick={() => setWordSpacing(Math.min(50, wordSpacing + 1))}
-                              className="px-1 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                              className="btn btn-ghost btn-xs"
                             >
                               +
                             </button>
@@ -2784,7 +4416,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                             <button
                               type="button"
                               onClick={() => setLetterSpacing(Math.max(0, letterSpacing - 1))}
-                              className="px-1 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                              className="btn btn-ghost btn-xs"
                             >
                               -
                             </button>
@@ -2803,7 +4435,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                             <button
                               type="button"
                               onClick={() => setLetterSpacing(Math.min(50, letterSpacing + 1))}
-                              className="px-1 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                              className="btn btn-ghost btn-xs"
                             >
                               +
                             </button>
@@ -2872,6 +4504,24 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                         { key: "wiperl", label: "W-RL" },
                         { key: "wipetb", label: "W-TB" },
                         { key: "wipebt", label: "W-BT" },
+                        // v15 Transition Library
+                        { key: "glitch", label: "Glitch" },
+                        { key: "glitchv", label: "GlitchV" },
+                        { key: "whippan", label: "Whip" },
+                        { key: "zoomthrough", label: "ZoomThru" },
+                        { key: "flashblack", label: "FlashB" },
+                        { key: "blurmorph", label: "Blur" },
+                        { key: "windwipe", label: "Wind" },
+                        { key: "coverleft", label: "Cover" },
+                        { key: "revealright", label: "Reveal" },
+                        { key: "squeeze", label: "Squeeze" },
+                        { key: "diagonal", label: "Diag" },
+                        { key: "circlecrop", label: "CirCrop" },
+                        { key: "rectcrop", label: "RectCrop" },
+                        { key: "distance", label: "Dist" },
+                        { key: "grayscale", label: "Gray" },
+                        { key: "vertopen", label: "V-Open" },
+                        { key: "horzopen", label: "H-Open" },
                         { key: "random", label: "🎲 Random" },
                       ].map(t => (
                         <button
@@ -2882,8 +4532,8 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                             if (project) {
                               project.settings.transitionType = val;
                               project.settings.transitionDuration = transitionDuration;
-                              fetch("/api/settings", {
-                                method: "POST",
+                              fetch(`/api/projects/${project.id}/settings`, {
+                                method: "PATCH",
                                 headers: { "Content-Type": "application/json" },
                                 body: JSON.stringify(project.settings)
                               });
@@ -2917,8 +4567,8 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                               if (project) {
                                 project.settings.transitionDuration = val;
                                 project.settings.transitionType = transitionType;
-                                fetch("/api/settings", {
-                                  method: "POST",
+                                fetch(`/api/projects/${project.id}/settings`, {
+                                  method: "PATCH",
                                   headers: { "Content-Type": "application/json" },
                                   body: JSON.stringify(project.settings)
                                 });
@@ -2964,7 +4614,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
           <div className="w-full max-w-5xl bg-slate-900 border border-slate-800 rounded-2xl p-4 shrink-0 flex items-center justify-between gap-4">
             <button
               onClick={() => setIsFullScreenPlaying(!isFullScreenPlaying)}
-              className="w-10 h-10 rounded-xl bg-indigo-600 hover:bg-indigo-500 flex items-center justify-center text-white cursor-pointer transition-colors shadow-lg shadow-indigo-600/20 shrink-0"
+              className="btn btn-primary btn-icon shrink-0"
               title={isFullScreenPlaying ? "Pause Playback" : "Start Playback"}
             >
               {isFullScreenPlaying ? <Pause className="w-5 h-5 fill-white" /> : <Play className="w-5 h-5 fill-white ml-0.5" />}
@@ -3019,7 +4669,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
 
             <button
               onClick={() => setIsFullScreenMuted(!isFullScreenMuted)}
-              className="p-2.5 bg-slate-950 border border-slate-800/80 hover:bg-slate-800 text-slate-400 hover:text-white rounded-xl cursor-pointer transition-colors"
+              className="btn btn-secondary btn-icon"
               title={isFullScreenMuted ? "Unmute Volume" : "Mute Volume"}
             >
               {isFullScreenMuted ? <VolumeX className="w-5 h-5 text-slate-500" /> : <Volume2 className="w-5 h-5 text-indigo-400 animate-pulse" />}
@@ -3033,8 +4683,8 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-50 flex items-center justify-center p-4 animate-fade-in">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-lg w-full max-h-[80vh] overflow-hidden flex flex-col shadow-2xl">
             <div className="p-4 border-b border-slate-800 flex items-center justify-between">
-              <h4 className="font-display font-bold text-sm text-white">🎵 BGM Library</h4>
-              <button onClick={() => setShowBgmLibrary(false)} className="text-slate-400 hover:text-slate-200 text-xs px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg cursor-pointer">Close</button>
+              <h4 className="font-display font-bold text-sm text-ink">🎵 BGM Library</h4>
+              <button onClick={() => setShowBgmLibrary(false)} className="btn btn-secondary btn-sm">Close</button>
             </div>
             <div className="flex-1 overflow-y-auto p-3 space-y-4">
               {bgmLoading ? (
@@ -3078,8 +4728,8 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-50 flex items-center justify-center p-4 animate-fade-in">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-lg w-full max-h-[80vh] overflow-hidden flex flex-col shadow-2xl">
             <div className="p-4 border-b border-slate-800 flex items-center justify-between">
-              <h4 className="font-display font-bold text-sm text-white">🔊 Sound Effects</h4>
-              <button onClick={() => setShowSfxBrowser(false)} className="text-slate-400 hover:text-slate-200 text-xs px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg cursor-pointer">Close</button>
+              <h4 className="font-display font-bold text-sm text-ink">🔊 Sound Effects</h4>
+              <button onClick={() => setShowSfxBrowser(false)} className="btn btn-secondary btn-sm">Close</button>
             </div>
             {/* Category tabs */}
             <div className="p-3 bg-slate-950 border-b border-slate-800/60 overflow-x-auto">
@@ -3112,7 +4762,7 @@ export default function ProjectDetailsView({ projectId, onBack }: ProjectDetails
                           {previewSfxUrl === track.url ? "⏹" : "▶"}
                         </button>
                         <button onClick={() => handleApplyBuiltinSfx(track)}
-                          className="flex-1 px-2 py-1 text-[8px] bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg cursor-pointer font-semibold">
+                          className="btn btn-primary btn-xs flex-1">
                           + Add
                         </button>
                       </div>

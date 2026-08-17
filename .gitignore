@@ -1,7 +1,34 @@
+# Dependencies
 node_modules/
+
+# Build output
+build/
 dist/
-storage/projects/
+coverage/
+__pycache__/
+
+# Runtime data & secrets — NEVER commit
 .env
-.env.local
+.env.*
+!.env.example
+data/
+storage/
 *.log
+
+# Local backups / archives
+*.zip
+*.bak
+*.bak-*
+server.ts.bak
+src/types.ts.bak
+
+# OS junk
 .DS_Store
+Thumbs.db
+
+# Editor / agent residue
+.openclaude/
+.superpowers/
+tmp_reverse/
+workspace/
+node_modules

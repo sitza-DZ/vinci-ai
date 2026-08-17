@@ -171,7 +171,7 @@ export default function RenderDiagnosticsView({ projects }: RenderDiagnosticsVie
           <Activity className="w-8 h-8 text-indigo-400" />
         </div>
         <div className="space-y-2">
-          <h3 className="font-display font-bold text-xl text-white">Diagnostics Ledger Empty</h3>
+          <h3 className="font-display font-bold text-xl text-ink">Diagnostics Ledger Empty</h3>
           <p className="text-slate-400 text-sm max-w-md mx-auto leading-relaxed">
             There are currently no video generation pipelines initialized. Head over to the "Create Short" workspace to structure and render your first short story.
           </p>
@@ -199,7 +199,7 @@ export default function RenderDiagnosticsView({ projects }: RenderDiagnosticsVie
       {/* Title Header Block */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 border-b border-slate-800 pb-5">
         <div>
-          <h2 className="font-display font-bold text-2xl tracking-tight text-white flex items-center gap-2.5">
+          <h2 className="font-display font-bold text-2xl tracking-tight text-ink flex items-center gap-2.5">
             <Activity className="w-6 h-6 text-indigo-500" />
             Render Diagnostics Center
           </h2>
@@ -251,14 +251,14 @@ export default function RenderDiagnosticsView({ projects }: RenderDiagnosticsVie
                     <button
                       onClick={triggerClearCache}
                       disabled={isClearing}
-                      className="bg-rose-600 hover:bg-rose-500 text-white font-semibold text-[10px] px-2.5 py-1 rounded-lg cursor-pointer transition-colors"
+                      className="btn btn-danger btn-xs"
                     >
                       {isClearing ? "Resetting..." : "YES"}
                     </button>
                     <button
                       onClick={() => setShowConfirm(false)}
                       disabled={isClearing}
-                      className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-[10px] px-2.5 py-1 rounded-lg cursor-pointer transition-colors"
+                      className="btn btn-secondary btn-xs"
                     >
                       NO
                     </button>
@@ -283,14 +283,14 @@ export default function RenderDiagnosticsView({ projects }: RenderDiagnosticsVie
                 <button
                   onClick={triggerClearAllCaches}
                   disabled={isClearingAll}
-                  className="bg-red-600 hover:bg-red-500 text-white font-semibold text-[10px] px-2.5 py-1 rounded-lg cursor-pointer transition-colors"
+                  className="btn btn-danger btn-xs"
                 >
                   {isClearingAll ? "Purging..." : "YES"}
                 </button>
                 <button
                   onClick={() => setShowConfirmAll(false)}
                   disabled={isClearingAll}
-                  className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-[10px] px-2.5 py-1 rounded-lg cursor-pointer transition-colors"
+                  className="btn btn-secondary btn-xs"
                 >
                   NO
                 </button>
@@ -327,7 +327,7 @@ export default function RenderDiagnosticsView({ projects }: RenderDiagnosticsVie
               </div>
               <div className="text-right sm:border-l sm:border-current/10 sm:pl-6 shrink-0">
                 <span className="text-[10px] text-slate-400 uppercase font-bold font-mono">Export Format</span>
-                <p className="text-xs font-mono font-bold text-white mt-0.5">{activeProject.settings.qualitySelection.toUpperCase()} MP4 Portrait (9:16)</p>
+                <p className="text-xs font-mono font-bold text-ink mt-0.5">{activeProject.settings.qualitySelection.toUpperCase()} MP4 Portrait (9:16)</p>
               </div>
             </div>
           )}
@@ -341,7 +341,7 @@ export default function RenderDiagnosticsView({ projects }: RenderDiagnosticsVie
               </div>
               <div>
                 <p className="text-[10px] text-slate-500 font-mono font-bold uppercase">Total Scenes</p>
-                <p className="text-2xl font-bold font-mono text-white mt-1">{diagnostics?.totalScenes || 0}</p>
+                <p className="text-2xl font-bold font-mono text-ink mt-1">{diagnostics?.totalScenes || 0}</p>
                 <p className="text-[10px] text-slate-400 mt-0.5 truncate">Storyboard segments</p>
               </div>
             </div>
@@ -353,7 +353,7 @@ export default function RenderDiagnosticsView({ projects }: RenderDiagnosticsVie
               </div>
               <div>
                 <p className="text-[10px] text-slate-500 font-mono font-bold uppercase">Downloaded Clips</p>
-                <p className="text-2xl font-bold font-mono text-white mt-1">{diagnostics?.totalDownloadedClips || 0}</p>
+                <p className="text-2xl font-bold font-mono text-ink mt-1">{diagnostics?.totalDownloadedClips || 0}</p>
                 <p className="text-[10px] text-slate-400 mt-0.5 truncate">Sourced stock assets</p>
               </div>
             </div>
@@ -365,7 +365,7 @@ export default function RenderDiagnosticsView({ projects }: RenderDiagnosticsVie
               </div>
               <div>
                 <p className="text-[10px] text-slate-500 font-mono font-bold uppercase">Processed Clips</p>
-                <p className="text-2xl font-bold font-mono text-white mt-1">{diagnostics?.totalProcessedClips || 0}</p>
+                <p className="text-2xl font-bold font-mono text-ink mt-1">{diagnostics?.totalProcessedClips || 0}</p>
                 <p className="text-[10px] text-slate-400 mt-0.5 truncate">Trimmed & sequenced</p>
               </div>
             </div>
@@ -377,7 +377,7 @@ export default function RenderDiagnosticsView({ projects }: RenderDiagnosticsVie
               </div>
               <div>
                 <p className="text-[10px] text-slate-500 font-mono font-bold uppercase">Subtitles Status</p>
-                <p className="text-lg font-bold font-mono text-white mt-2 capitalize">{diagnostics?.subtitleStatus || "idle"}</p>
+                <p className="text-lg font-bold font-mono text-ink mt-2 capitalize">{diagnostics?.subtitleStatus || "idle"}</p>
                 <p className="text-[10px] text-slate-400 mt-1 truncate">Substation Alpha (.ass)</p>
               </div>
             </div>
@@ -389,7 +389,7 @@ export default function RenderDiagnosticsView({ projects }: RenderDiagnosticsVie
               </div>
               <div>
                 <p className="text-[10px] text-slate-500 font-mono font-bold uppercase">Final Duration</p>
-                <p className="text-2xl font-bold font-mono text-white mt-1">{diagnostics?.finalVideoDuration || 0}s</p>
+                <p className="text-2xl font-bold font-mono text-ink mt-1">{diagnostics?.finalVideoDuration || 0}s</p>
                 <p className="text-[10px] text-slate-400 mt-0.5 truncate">Export playback time</p>
               </div>
             </div>
@@ -411,7 +411,7 @@ export default function RenderDiagnosticsView({ projects }: RenderDiagnosticsVie
               {/* Source Resolution */}
               <div className="bg-slate-950/60 p-3.5 rounded-xl border border-slate-800/80">
                 <span className="text-[9px] text-slate-500 font-mono font-bold uppercase block">Source Resolution</span>
-                <span className="text-xs font-mono font-bold text-white mt-1 block">
+                <span className="text-xs font-mono font-bold text-ink mt-1 block">
                   {diagnostics?.sourceResolution || "1920x1080 (Landscape to Vert)"}
                 </span>
                 <span className="text-[9px] text-slate-400 mt-0.5 block font-mono">Dynamic Upscaling Enabled</span>
@@ -429,7 +429,7 @@ export default function RenderDiagnosticsView({ projects }: RenderDiagnosticsVie
               {/* Bitrate */}
               <div className="bg-slate-950/60 p-3.5 rounded-xl border border-slate-800/80">
                 <span className="text-[9px] text-slate-500 font-mono font-bold uppercase block">Target Bitrate</span>
-                <span className="text-xs font-mono font-bold text-white mt-1 block">
+                <span className="text-xs font-mono font-bold text-ink mt-1 block">
                   {diagnostics?.bitrate || "10.4 Mbps (Average)"}
                 </span>
                 <span className="text-[9px] text-slate-400 mt-0.5 block font-mono">Min 8 Mbps Requirement Met</span>
@@ -438,7 +438,7 @@ export default function RenderDiagnosticsView({ projects }: RenderDiagnosticsVie
               {/* FPS */}
               <div className="bg-slate-950/60 p-3.5 rounded-xl border border-slate-800/80">
                 <span className="text-[9px] text-slate-500 font-mono font-bold uppercase block">Frame Rate</span>
-                <span className="text-xs font-mono font-bold text-white mt-1 block">
+                <span className="text-xs font-mono font-bold text-ink mt-1 block">
                   {diagnostics?.fps ? `${diagnostics.fps} FPS` : "30 FPS"}
                 </span>
                 <span className="text-[9px] text-slate-400 mt-0.5 block font-mono">Steady Web Standard</span>
@@ -447,7 +447,7 @@ export default function RenderDiagnosticsView({ projects }: RenderDiagnosticsVie
               {/* Codec */}
               <div className="bg-slate-950/60 p-3.5 rounded-xl border border-slate-800/80">
                 <span className="text-[9px] text-slate-500 font-mono font-bold uppercase block">Encoder Codec</span>
-                <span className="text-xs font-mono font-bold text-white mt-1 block">
+                <span className="text-xs font-mono font-bold text-ink mt-1 block">
                   {diagnostics?.codec || "H.264 (libx264)"}
                 </span>
                 <span className="text-[9px] text-slate-400 mt-0.5 block font-mono">Pixel Format: yuv420p</span>
@@ -471,7 +471,7 @@ export default function RenderDiagnosticsView({ projects }: RenderDiagnosticsVie
               {/* Rendered File Path */}
               <div className="bg-slate-950/60 p-3.5 rounded-xl border border-slate-800/80 md:col-span-2">
                 <span className="text-[9px] text-slate-500 font-mono font-bold uppercase block">Rendered File Path</span>
-                <span className="text-xs font-mono font-bold text-white mt-1 block truncate" title={diagnostics?.downloadDiagnostics?.renderedFilePath || `storage/projects/${selectedProjectId}/renders/${selectedProjectId}_final.mp4`}>
+                <span className="text-xs font-mono font-bold text-ink mt-1 block truncate" title={diagnostics?.downloadDiagnostics?.renderedFilePath || `storage/projects/${selectedProjectId}/renders/${selectedProjectId}_final.mp4`}>
                   {diagnostics?.downloadDiagnostics?.renderedFilePath || `storage/projects/${selectedProjectId}/renders/${selectedProjectId}_final.mp4`}
                 </span>
                 <span className="text-[9px] text-slate-400 mt-0.5 block font-mono">Isolated Server Workspace Path</span>
@@ -489,7 +489,7 @@ export default function RenderDiagnosticsView({ projects }: RenderDiagnosticsVie
               {/* File Size */}
               <div className="bg-slate-950/60 p-3.5 rounded-xl border border-slate-800/80">
                 <span className="text-[9px] text-slate-500 font-mono font-bold uppercase block">File Size</span>
-                <span className="text-xs font-mono font-bold text-white mt-1 block">
+                <span className="text-xs font-mono font-bold text-ink mt-1 block">
                   {diagnostics?.downloadDiagnostics?.fileSize || "0.00 MB"}
                 </span>
                 <span className="text-[9px] text-slate-400 mt-0.5 block font-mono">Computed MP4 Byte Size</span>
@@ -558,7 +558,7 @@ export default function RenderDiagnosticsView({ projects }: RenderDiagnosticsVie
               {/* Download Count */}
               <div className="bg-slate-950/60 p-3.5 rounded-xl border border-slate-800/80">
                 <span className="text-[9px] text-slate-500 font-mono font-bold uppercase block">Download Count</span>
-                <span className="text-xs font-mono font-bold text-white mt-1 block">
+                <span className="text-xs font-mono font-bold text-ink mt-1 block">
                   {diagnostics?.downloadCount !== undefined ? diagnostics.downloadCount : (diagnostics?.totalDownloadedClips || 0)} Clips
                 </span>
                 <span className="text-[9px] text-slate-400 mt-0.5 block font-mono">Fresh Stock Files</span>
@@ -567,7 +567,7 @@ export default function RenderDiagnosticsView({ projects }: RenderDiagnosticsVie
               {/* Processed Clip Count */}
               <div className="bg-slate-950/60 p-3.5 rounded-xl border border-slate-800/80">
                 <span className="text-[9px] text-slate-500 font-mono font-bold uppercase block">Processed Clip Count</span>
-                <span className="text-xs font-mono font-bold text-white mt-1 block">
+                <span className="text-xs font-mono font-bold text-ink mt-1 block">
                   {diagnostics?.processedClipCount !== undefined ? diagnostics.processedClipCount : (diagnostics?.totalProcessedClips || 0)} Clips
                 </span>
                 <span className="text-[9px] text-slate-400 mt-0.5 block font-mono">Sequenced segments</span>

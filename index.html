@@ -3,11 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>My Google AI Studio App</title>
+    <title>AI Shorts Generator</title>
+    <script>
+      // Apply saved day/night mode before first paint (no flash)
+      (function () {
+        try {
+          var m = localStorage.getItem("vinci-mode");
+          if (m === "light") document.documentElement.setAttribute("data-mode", "light");
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

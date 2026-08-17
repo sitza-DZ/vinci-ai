@@ -16,13 +16,37 @@ import {
   User,
   Film,
   Upload,
-  Globe
+  Globe,
+  Mic,
+  Play,
+  ExternalLink,
+  LogOut
 } from "lucide-react";
 import { SubtitleStyleType, UserSettings, VideoSource, ApiKeyConfig, AISystemSettings, AIUsageStats, NVIDIA_MODELS } from "../types";
 
 interface SettingsViewProps {
   onProfileUpdate?: () => void;
 }
+
+// v14: every boolean feature exposed as an on/off switch in Global Workspace Defaults
+const FEATURE_TOGGLES: { key: keyof UserSettings; label: string; desc: string }[] = [
+  { key: "smartSceneDistribution", label: "Smart Scene Distribution", desc: "First 4 scenes fast (3s), rest smooth (5s)" },
+  { key: "subtitleEnabled", label: "Subtitle Overlay", desc: "Burn subtitles into the video" },
+  { key: "autoSfxEnabled", label: "Auto Sound Effects", desc: "Place SFX by scene emotion" },
+  { key: "edgeTtsEnabled", label: "AI Voiceover (Edge TTS)", desc: "Generate AI narration voice" },
+  { key: "autoTikTokSource", label: "Auto TikTok Source", desc: "Search TikTok for scene footage" },
+  { key: "blurTikTokWatermark", label: "Blur Watermark", desc: "Blur watermark region on clips" },
+  { key: "watermarkEnabled", label: "Custom Watermark", desc: "Overlay your logo on videos" },
+  { key: "ctaEnabled", label: "End-Card CTA", desc: "Call-to-action overlay at the end" },
+  { key: "autoEmoji", label: "Auto Emojis", desc: "Add emojis to hooks" },
+  { key: "autoHashtags", label: "Auto Hashtags", desc: "Generate hashtags for upload" },
+  { key: "kenBurnsEnabled", label: "Ken Burns Effect", desc: "Zoom/pan on image scenes" },
+  { key: "duckingEnabled", label: "Music Ducking", desc: "Lower music during voiceover" },
+  { key: "aiThumbnail", label: "AI Thumbnail Text", desc: "Overlay title on thumbnail" },
+  { key: "silenceRemoval", label: "Silence Removal", desc: "Cut silent gaps from voiceover" },
+  { key: "footageQualityFilter", label: "Footage Quality Filter", desc: "Auto-swap low-res clips for HD" },
+  { key: "beatSyncEnabled", label: "Beat-Sync Cuts", desc: "Snap scene cuts to BGM beats" },
+];
 
 export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
   const [sources, setSources] = useState<VideoSource[]>([]);
@@ -32,7 +56,7 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
   const [alertMsg, setAlertMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
   // Tabs state
-  const [activeTab, setActiveTab] = useState<"defaults" | "keys" | "ai" | "youtube" | "profile">("defaults");
+  const [activeTab, setActiveTab] = useState<"defaults" | "keys" | "ai" | "youtube" | "profile" | "security">("defaults");
 
   // Profile fields state
   const [profileName, setProfileName] = useState("");
@@ -52,6 +76,27 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
   const [visibleKeys, setVisibleKeys] = useState<Record<string, boolean>>({});
   const [testingId, setTestingId] = useState<string | null>(null);
   const [savingId, setSavingId] = useState<string | null>(null);
+
+  // Logout handler — clears session cookie and returns to landing page
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const handleLogout = async () => {
+    try {
+      setIsLoggingOut(true);
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch {
+      // ignore network errors — still clear local state
+    } finally {
+      // Reload to drop back to the landing page (session cookie cleared server-side)
+      window.location.reload();
+    }
+  };
+
+  // v16: Voice Cloning (Colab XTTS server)
+  const [vcTesting, setVcTesting] = useState(false);
+  const [vcTestResult, setVcTestResult] = useState<{ ok: boolean; detail: string } | null>(null);
+  const [vcPreviewing, setVcPreviewing] = useState(false);
+  const [vcPreviewUrl, setVcPreviewUrl] = useState<string | null>(null);
+  const [vcPreviewMsg, setVcPreviewMsg] = useState<string | null>(null);
 
   // Fetch settings & API keys
   const fetchSettingsAndKeys = async () => {
@@ -146,6 +191,51 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
   // API key handlers
   const handleInputChange = (id: string, value: string) => {
     setInputKeys(prev => ({ ...prev, [id]: value }));
+  };
+
+  // v16: Voice Cloning handlers
+  const handleVcTest = async () => {
+    if (!defaultSettings) return;
+    setVcTesting(true);
+    setVcTestResult(null);
+    try {
+      const res = await fetch("/api/voice-clone/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: (defaultSettings as any).voiceCloneUrl || "" })
+      });
+      const data = await res.json();
+      setVcTestResult({ ok: !!data.success, detail: data.detail || data.error || "Unknown result" });
+    } catch (e: any) {
+      setVcTestResult({ ok: false, detail: e.message || "Connection failed" });
+    } finally {
+      setVcTesting(false);
+    }
+  };
+
+  const handleVcPreview = async () => {
+    if (!defaultSettings) return;
+    setVcPreviewing(true);
+    setVcPreviewUrl(null);
+    setVcPreviewMsg(null);
+    try {
+      const res = await fetch("/api/voice-clone/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: (defaultSettings as any).voiceCloneUrl || "" })
+      });
+      const data = await res.json();
+      if (data.success && data.audioUrl) {
+        setVcPreviewUrl(data.audioUrl);
+        setVcPreviewMsg(data.message || "Preview ready");
+      } else {
+        setVcPreviewMsg(data.error || "Preview generation failed");
+      }
+    } catch (e: any) {
+      setVcPreviewMsg(e.message || "Preview request failed");
+    } finally {
+      setVcPreviewing(false);
+    }
   };
 
   const toggleVisibility = (id: string) => {
@@ -357,11 +447,22 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
 
   return (
     <div className="max-w-4xl mx-auto space-y-8 text-left">
-      <div>
-        <h2 className="text-3xl font-display font-bold text-white">Settings</h2>
-        <p className="text-slate-400 text-sm mt-1">
-          Configure default video ratios, override global subtitle templates, and manage secure external APIs.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-3xl font-display font-bold text-ink">Settings</h2>
+          <p className="text-slate-400 text-sm mt-1">
+            Configure default video ratios, override global subtitle templates, and manage secure external APIs.
+          </p>
+        </div>
+        <button
+          onClick={handleLogout}
+          disabled={isLoggingOut}
+          className="shrink-0 flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider font-mono border border-red-500/30 text-red-400 hover:bg-red-500/10 hover:border-red-500/60 transition-all cursor-pointer disabled:opacity-50"
+          title="Sign out and return to the landing page"
+        >
+          <LogOut className="w-4 h-4" />
+          {isLoggingOut ? "Signing out…" : "Logout"}
+        </button>
       </div>
 
       {/* Elegant Sub-navigation Bar */}
@@ -420,6 +521,17 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
           <User className="w-3.5 h-3.5" />
           Creator Profile
         </button>
+        <button
+          onClick={() => setActiveTab("security")}
+          className={`px-5 py-3 text-xs font-bold uppercase tracking-wider font-mono border-b-2 transition-all cursor-pointer flex items-center gap-2 ${
+            activeTab === "security"
+              ? "border-indigo-500 text-indigo-400"
+              : "border-transparent text-slate-400 hover:text-slate-200"
+          }`}
+        >
+          <Lock className="w-3.5 h-3.5" />
+          Security
+        </button>
       </div>
 
       {alertMsg && (
@@ -469,44 +581,6 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
                 </select>
               </div>
 
-              {/* Smart Scene Distribution */}
-              <div className="space-y-2">
-                <label className="text-xs font-bold text-slate-300 uppercase tracking-wider font-mono">Smart Scene Distribution</label>
-                <div className="flex items-center gap-3 bg-slate-950 px-4 py-3 rounded-xl border border-slate-800/85">
-                  <button
-                    type="button"
-                    onClick={() => setDefaultSettings({ ...defaultSettings, smartSceneDistribution: !defaultSettings.smartSceneDistribution })}
-                    className={`w-10 h-6 rounded-full transition-all relative ${
-                      defaultSettings.smartSceneDistribution ? "bg-indigo-600" : "bg-slate-800"
-                    }`}
-                  >
-                    <span className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-all ${
-                      defaultSettings.smartSceneDistribution ? "translate-x-4" : "translate-x-0"
-                    }`} />
-                  </button>
-                  <span className="text-xs text-slate-300 font-semibold leading-relaxed">First 4 scenes fast (3s), rest smooth (5s) — 14 total scenes</span>
-                </div>
-              </div>
-
-              {/* Default Subtitle toggle */}
-              <div className="space-y-2">
-                <label className="text-xs font-bold text-slate-300 uppercase tracking-wider font-mono">Default Subtitle Overlay</label>
-                <div className="flex items-center gap-3 bg-slate-950 px-4 py-3 rounded-xl border border-slate-800/85">
-                  <button
-                    type="button"
-                    onClick={() => setDefaultSettings({ ...defaultSettings, subtitleEnabled: !defaultSettings.subtitleEnabled })}
-                    className={`w-10 h-6 rounded-full transition-all relative ${
-                      defaultSettings.subtitleEnabled ? "bg-indigo-600" : "bg-slate-800"
-                    }`}
-                  >
-                    <span className={`absolute top-1 left-1 w-4 h-4 bg-white rounded-full transition-all ${
-                      defaultSettings.subtitleEnabled ? "translate-x-4" : "translate-x-0"
-                    }`} />
-                  </button>
-                  <span className="text-xs text-slate-300 font-semibold">Burn subtitles on creation</span>
-                </div>
-              </div>
-
               {/* Default Subtitle Style preset */}
               <div className="space-y-2">
                 <label className="text-xs font-bold text-slate-300 uppercase tracking-wider font-mono">Default Subtitle Style</label>
@@ -521,6 +595,9 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
                   <option value={SubtitleStyleType.CINEMATIC}>Cinematic Serif</option>
                   <option value={SubtitleStyleType.GAMING}>Neon Gaming Yellow</option>
                   <option value={SubtitleStyleType.ARABIC_PREMIUM}>Arabic Premium (RTL)</option>
+                  <option value={SubtitleStyleType.KARAOKE}>🎤 Karaoke Fill Sweep</option>
+                  <option value={SubtitleStyleType.WORD_POP}>💥 Word Pop (MrBeast)</option>
+                  <option value={SubtitleStyleType.TYPEWRITER}>⌨️ Typewriter Reveal</option>
                 </select>
               </div>
 
@@ -535,7 +612,7 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
                         const current = defaultSettings.fontSize !== undefined ? defaultSettings.fontSize : 14;
                         setDefaultSettings({ ...defaultSettings, fontSize: Math.max(0, current - 1) });
                       }}
-                      className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                      className="btn btn-ghost btn-xs"
                     >
                       -
                     </button>
@@ -557,7 +634,7 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
                         const current = defaultSettings.fontSize !== undefined ? defaultSettings.fontSize : 14;
                         setDefaultSettings({ ...defaultSettings, fontSize: Math.min(100, current + 1) });
                       }}
-                      className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                      className="btn btn-ghost btn-xs"
                     >
                       +
                     </button>
@@ -585,7 +662,7 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
                         const current = defaultSettings.wordSpacing !== undefined ? defaultSettings.wordSpacing : 8;
                         setDefaultSettings({ ...defaultSettings, wordSpacing: Math.max(0, current - 1) });
                       }}
-                      className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                      className="btn btn-ghost btn-xs"
                     >
                       -
                     </button>
@@ -607,7 +684,7 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
                         const current = defaultSettings.wordSpacing !== undefined ? defaultSettings.wordSpacing : 8;
                         setDefaultSettings({ ...defaultSettings, wordSpacing: Math.min(50, current + 1) });
                       }}
-                      className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                      className="btn btn-ghost btn-xs"
                     >
                       +
                     </button>
@@ -635,7 +712,7 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
                         const current = defaultSettings.letterSpacing !== undefined ? defaultSettings.letterSpacing : 8;
                         setDefaultSettings({ ...defaultSettings, letterSpacing: Math.max(0, current - 1) });
                       }}
-                      className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                      className="btn btn-ghost btn-xs"
                     >
                       -
                     </button>
@@ -657,7 +734,7 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
                         const current = defaultSettings.letterSpacing !== undefined ? defaultSettings.letterSpacing : 8;
                         setDefaultSettings({ ...defaultSettings, letterSpacing: Math.min(50, current + 1) });
                       }}
-                      className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                      className="btn btn-ghost btn-xs"
                     >
                       +
                     </button>
@@ -675,11 +752,155 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
               </div>
             </div>
 
+            {/* ===== v14: FEATURE TOGGLES — on/off for every function ===== */}
+            <div className="border-t border-slate-800 pt-5 space-y-3">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider font-mono flex items-center gap-2">
+                  <Power className="w-3.5 h-3.5 text-indigo-400" />
+                  Feature Toggles
+                </h4>
+                <span className="text-[10px] font-mono text-slate-500">
+                  {FEATURE_TOGGLES.filter(t => (defaultSettings as any)[t.key] === true).length}/{FEATURE_TOGGLES.length} ON
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {FEATURE_TOGGLES.map(t => {
+                  const isOn = (defaultSettings as any)[t.key] === true;
+                  return (
+                    <div
+                      key={t.key}
+                      className={`flex items-center justify-between gap-3 rounded-xl border px-3.5 py-2.5 transition-colors ${
+                        isOn ? "bg-indigo-600/10 border-indigo-500/40" : "bg-slate-950 border-slate-800/85"
+                      }`}
+                    >
+                      <div className="flex-1 min-w-0">
+                        <p className={`text-[11px] font-bold font-mono ${isOn ? "text-indigo-300" : "text-slate-300"}`}>{t.label}</p>
+                        <p className="text-[10px] text-slate-500 leading-snug">{t.desc}</p>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={isOn}
+                        aria-label={t.label}
+                        onClick={() => setDefaultSettings({ ...defaultSettings, [t.key]: !isOn })}
+                        className={`w-11 h-6 rounded-full transition-all relative flex-shrink-0 cursor-pointer ${
+                          isOn ? "bg-indigo-600" : "bg-slate-800"
+                        }`}
+                      >
+                        <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-all ${
+                          isOn ? "translate-x-5" : "translate-x-0"
+                        }`} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* ===== v16: VOICE CLONING (Colab XTTS server) ===== */}
+            <div className="border-t border-slate-800 pt-5 space-y-4">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider font-mono flex items-center gap-2">
+                  <Mic className="w-3.5 h-3.5 text-amber-400" />
+                  Voice Cloning (Colab XTTS)
+                </h4>
+                <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full ${
+                  (defaultSettings as any).voiceCloneEnabled ? "bg-amber-600/20 text-amber-300" : "bg-slate-800 text-slate-500"
+                }`}>
+                  {(defaultSettings as any).voiceCloneEnabled ? "ENABLED" : "OFF"}
+                </span>
+              </div>
+
+              <p className="text-[11px] text-slate-500 leading-relaxed">
+                Apni awaaz clone karke narration ke liye use karo. Colab notebook chalao, URL yahan paste karo.
+                Agar Colab server band ho to automatically edge-tts pe fallback ho jayega.
+              </p>
+
+              {/* Enable toggle */}
+              <div className="flex items-center justify-between gap-3 rounded-xl border bg-slate-950 border-slate-800/85 px-3.5 py-2.5">
+                <div className="flex-1 min-w-0">
+                  <p className="text-[11px] font-bold font-mono text-slate-300">Use Cloned Voice</p>
+                  <p className="text-[10px] text-slate-500 leading-snug">Voiceover me cloned voice use karo (edge-tts ki jagah)</p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={!!(defaultSettings as any).voiceCloneEnabled}
+                  onClick={() => setDefaultSettings({ ...defaultSettings, voiceCloneEnabled: !(defaultSettings as any).voiceCloneEnabled })}
+                  className={`w-11 h-6 rounded-full transition-all relative flex-shrink-0 cursor-pointer ${
+                    (defaultSettings as any).voiceCloneEnabled ? "bg-amber-600" : "bg-slate-800"
+                  }`}
+                >
+                  <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-all ${
+                    (defaultSettings as any).voiceCloneEnabled ? "translate-x-5" : "translate-x-0"
+                  }`} />
+                </button>
+              </div>
+
+              {/* URL input */}
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-300 uppercase tracking-wider font-mono">Colab Tunnel URL</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={(defaultSettings as any).voiceCloneUrl || ""}
+                    onChange={(e) => setDefaultSettings({ ...defaultSettings, voiceCloneUrl: e.target.value })}
+                    placeholder="https://xxxx-xxxx.trycloudflare.com"
+                    className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 outline-none focus:border-amber-500/50 font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleVcTest}
+                    disabled={vcTesting}
+                    className="btn btn-outline btn-sm flex-shrink-0"
+                  >
+                    {vcTesting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Server className="w-3.5 h-3.5" />}
+                    Test
+                  </button>
+                </div>
+                {vcTestResult && (
+                  <div className={`flex items-start gap-2 text-[11px] rounded-lg px-3 py-2 ${
+                    vcTestResult.ok ? "bg-emerald-600/10 text-emerald-300" : "bg-red-600/10 text-red-300"
+                  }`}>
+                    {vcTestResult.ok ? <Check className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" /> : <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />}
+                    <span>{vcTestResult.detail}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Preview button */}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleVcPreview}
+                  disabled={vcPreviewing || !(defaultSettings as any).voiceCloneUrl}
+                  className="btn btn-outline btn-sm"
+                >
+                  {vcPreviewing ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                  {vcPreviewing ? "Generating..." : "Preview Cloned Voice"}
+                </button>
+                <a
+                  href="/colab/voice_clone_server.ipynb"
+                  download="voice_clone_server.ipynb"
+                  className="btn btn-outline btn-sm text-slate-400"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  Colab Notebook
+                </a>
+              </div>
+              {vcPreviewMsg && (
+                <p className={`text-[11px] ${vcPreviewUrl ? "text-emerald-300" : "text-red-300"}`}>{vcPreviewMsg}</p>
+              )}
+              {vcPreviewUrl && (
+                <audio controls src={vcPreviewUrl} className="w-full h-10" />
+              )}
+            </div>
+
             <div className="border-t border-slate-800 pt-5 flex justify-end">
               <button
                 type="submit"
                 disabled={isSaving}
-                className="flex items-center gap-2 px-5 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-colors cursor-pointer"
+                className="btn btn-primary btn-lg"
               >
                 {isSaving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                 Save Workspace Defaults
@@ -739,7 +960,7 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
         /* DEDICATED API KEYS MANAGEMENT PAGE */
         <div className="space-y-6">
           <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl space-y-3">
-            <h3 className="text-base font-bold text-white flex items-center gap-2">
+            <h3 className="text-base font-bold text-ink flex items-center gap-2">
               <Lock className="w-5 h-5 text-indigo-400" />
               Secure Encrypted Key-Vault
             </h3>
@@ -833,7 +1054,7 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
                           type="button"
                           onClick={() => handleSaveKey(key.id)}
                           disabled={isSavingThis}
-                          className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-800 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                          className="btn btn-primary btn-sm"
                         >
                           {isSavingThis ? (
                             <RefreshCw className="w-3.5 h-3.5 animate-spin" />
@@ -849,7 +1070,7 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
                           onClick={() => handleTestKey(key.id)}
                           disabled={isTestingThis || !hasActualKey}
                           title={!hasActualKey ? "Save an API Key first before testing connection." : ""}
-                          className="px-4 py-2.5 rounded-xl bg-slate-950 border border-slate-800 hover:border-slate-700 disabled:opacity-40 disabled:hover:border-slate-800 text-slate-300 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                          className="btn btn-secondary btn-sm"
                         >
                           {isTestingThis ? (
                             <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-400" />
@@ -934,7 +1155,7 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
             <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl space-y-6">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800/80 pb-4">
                 <div className="space-y-1">
-                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <h3 className="text-base font-bold text-ink flex items-center gap-2">
                     <Activity className="w-5 h-5 text-indigo-400" />
                     AI Provider Usage Dashboard
                   </h3>
@@ -945,7 +1166,7 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
                 <button
                   type="button"
                   onClick={handleResetAiStats}
-                  className="px-3 py-1.5 rounded-lg border border-slate-800 hover:border-slate-700 bg-slate-950 text-slate-400 hover:text-white text-[10px] font-mono font-bold transition-all cursor-pointer self-start sm:self-auto"
+                  className="btn btn-secondary btn-xs self-start sm:self-auto"
                 >
                   RESET STATISTICS
                 </button>
@@ -955,7 +1176,7 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <div className="bg-slate-950 p-4 rounded-xl border border-slate-800/60 text-center space-y-1">
                   <span className="text-[10px] font-bold text-slate-500 uppercase font-mono block">Total Requests</span>
-                  <span className="text-2xl font-bold text-white block">{aiStats.totalRequests || 0}</span>
+                  <span className="text-2xl font-bold text-ink block">{aiStats.totalRequests || 0}</span>
                 </div>
                 <div className="bg-slate-950 p-4 rounded-xl border border-slate-800/60 text-center space-y-1">
                   <span className="text-[10px] font-bold text-slate-500 uppercase font-mono block">Success Rate</span>
@@ -1086,7 +1307,7 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
                   <button
                     type="submit"
                     disabled={isSavingAi}
-                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-colors cursor-pointer"
+                    className="btn btn-primary btn-sm w-full"
                   >
                     {isSavingAi ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                     Save Router Settings
@@ -1171,7 +1392,7 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
                             type="button"
                             onClick={() => handleSaveKey(key.id)}
                             disabled={isSavingThis}
-                            className="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-800 text-white text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                            className="btn btn-primary btn-sm"
                           >
                             {isSavingThis ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
                             Save
@@ -1181,7 +1402,7 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
                             type="button"
                             onClick={() => handleTestKey(key.id)}
                             disabled={isTestingThis || !hasActualKey}
-                            className="px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 hover:border-slate-700 disabled:opacity-40 text-slate-300 text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                            className="btn btn-secondary btn-sm"
                           >
                             {isTestingThis ? <RefreshCw className="w-3 h-3 animate-spin text-indigo-400" /> : <Activity className="w-3 h-3 text-indigo-400" />}
                             Test
@@ -1193,13 +1414,13 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
                       {key.id === "nvidia" && (
                         <div>
                           <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono mb-1.5 flex items-center gap-1.5">
-                            <span className="w-1.5 h-1.5 bg-[#2FD0C4] rounded-full" />
+                            <span className="w-1.5 h-1.5 bg-[#E1306C] rounded-full" />
                             NVIDIA NIM Model
                           </div>
                           <select
                             value={key.model || "nvidia/llama-3.1-nemotron-70b-instruct"}
                             onChange={(e) => handleModelChange(key.id, e.target.value)}
-                            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-[11px] text-slate-200 outline-none focus:border-[#2FD0C4] cursor-pointer font-mono"
+                            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-[11px] text-slate-200 outline-none focus:border-[#E1306C] cursor-pointer font-mono"
                           >
                             {(() => {
                               const groups: Record<string, string[]> = {};
@@ -1281,7 +1502,7 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
       {activeTab === "profile" && (
         <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-6 sm:p-8 space-y-6">
           <div>
-            <h3 className="text-lg font-bold text-white flex items-center gap-2">
+            <h3 className="text-lg font-bold text-ink flex items-center gap-2">
               <User className="w-5 h-5 text-indigo-400" />
               Creator Identity Configuration
             </h3>
@@ -1402,7 +1623,7 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
                 <button
                   type="submit"
                   disabled={isSavingProfile}
-                  className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 text-white font-bold text-xs px-5 py-2.5 rounded-xl flex items-center justify-center gap-2 cursor-pointer transition-colors shadow-lg shadow-indigo-600/10 h-[38px]"
+                  className="btn btn-primary btn-sm w-full shadow-lg shadow-indigo-600/10 h-[38px]"
                 >
                   <Save className="w-4 h-4" />
                   {isSavingProfile ? "Saving Profile..." : "Save Profile Identity"}
@@ -1412,6 +1633,147 @@ export default function SettingsView({ onProfileUpdate }: SettingsViewProps) {
           </form>
         </div>
       )}
+
+      {activeTab === "security" && (
+        <SecurityTab />
+      )}
+    </div>
+  );
+}
+
+/* Security / PIN sub-component */
+function SecurityTab() {
+  const [pinSet, setPinSet] = useState<boolean | null>(null);
+  const [newPin, setNewPin] = useState("");
+  const [confirmPin, setConfirmPin] = useState("");
+  const [showPin, setShowPin] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
+  useEffect(() => {
+    fetch("/api/auth/status")
+      .then(r => r.json())
+      .then(d => setPinSet(d.pinSet === true))
+      .catch(() => setPinSet(false));
+  }, []);
+
+  const handleSavePin = async () => {
+    if (newPin.length < 4) {
+      setMsg({ type: "error", text: "PIN kam se kam 4 characters ka hona chahiye" });
+      return;
+    }
+    if (newPin !== confirmPin) {
+      setMsg({ type: "error", text: "Dono PIN match nahi kar rahe" });
+      return;
+    }
+    setSaving(true);
+    setMsg(null);
+    try {
+      const res = await fetch("/api/auth/change-pin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ newPin }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setMsg({ type: "success", text: "PIN save ho gaya! Ab app kholne par PIN lagega." });
+        setPinSet(true);
+        setNewPin("");
+        setConfirmPin("");
+      } else {
+        setMsg({ type: "error", text: data.error || "PIN save nahi hua" });
+      }
+    } catch (e: any) {
+      setMsg({ type: "error", text: "Server error: " + (e.message || "unknown") });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-6 sm:p-8 space-y-6 max-w-lg">
+      <div>
+        <h3 className="text-lg font-bold text-ink flex items-center gap-2">
+          <Lock className="w-5 h-5 text-indigo-400" />
+          PIN Security
+        </h3>
+        <p className="text-slate-400 text-xs mt-1">
+          App kholne par PIN lagega. Koi email/password nahi — sirf ek secret PIN.
+        </p>
+      </div>
+
+      <div className="flex items-center gap-2 text-xs font-mono">
+        <span className={`w-2 h-2 rounded-full ${pinSet ? "bg-emerald-400" : "bg-amber-400"}`} />
+        <span className="text-slate-300">
+          {pinSet === null ? "Checking..." : pinSet ? "PIN active hai ✅" : "PIN set nahi hai — app abhi open hai ⚠️"}
+        </span>
+      </div>
+
+      {msg && (
+        <div className={`text-xs px-4 py-2.5 rounded-lg border ${
+          msg.type === "success"
+            ? "bg-emerald-900/30 text-emerald-400 border-emerald-800"
+            : "bg-rose-900/30 text-rose-400 border-rose-800"
+        }`}>
+          {msg.text}
+        </div>
+      )}
+
+      <div className="space-y-4">
+        <div>
+          <label className="text-xs font-mono font-bold uppercase tracking-wider text-slate-400 block mb-2">
+            {pinSet ? "New PIN" : "Set PIN"}
+          </label>
+          <div className="relative">
+            <input
+              type={showPin ? "text" : "password"}
+              value={newPin}
+              onChange={(e) => setNewPin(e.target.value)}
+              placeholder="••••••"
+              maxLength={20}
+              className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-lg px-3 py-2.5 text-sm text-slate-100 outline-none transition-colors font-mono tracking-widest pr-10"
+              autoComplete="new-password"
+            />
+            <button
+              type="button"
+              onClick={() => setShowPin(!showPin)}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
+            >
+              {showPin ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <label className="text-xs font-mono font-bold uppercase tracking-wider text-slate-400 block mb-2">
+            Confirm PIN
+          </label>
+          <input
+            type={showPin ? "text" : "password"}
+            value={confirmPin}
+            onChange={(e) => setConfirmPin(e.target.value)}
+            placeholder="••••••"
+            maxLength={20}
+            className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-lg px-3 py-2.5 text-sm text-slate-100 outline-none transition-colors font-mono tracking-widest"
+            autoComplete="new-password"
+          />
+        </div>
+
+        <button
+          onClick={handleSavePin}
+          disabled={saving || !newPin || !confirmPin}
+          className="btn btn-primary btn-sm w-full shadow-lg shadow-indigo-600/10"
+        >
+          <Save className="w-4 h-4" />
+          {saving ? "Saving..." : pinSet ? "Change PIN" : "Set PIN"}
+        </button>
+      </div>
+
+      <div className="text-[10px] text-slate-500 border-t border-slate-800 pt-4 space-y-1 font-mono">
+        <p>• PIN set karne ke baad app kholne par landing page aayegi</p>
+        <p>• PIN bhool jao to db.json se auth section delete karke reset kar sakte ho</p>
+        <p>• Session 30 din ke liye valid rehta hai (ek baar login ke baad)</p>
+      </div>
     </div>
   );
 }
@@ -1422,13 +1784,52 @@ function YoutubeTab() {
   const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [cookiesText, setCookiesText] = useState("");
+  const [oauthConnected, setOauthConnected] = useState<boolean | null>(null);
+  const [oauthConfigured, setOauthConfigured] = useState<boolean | null>(null);
+  const [accounts, setAccounts] = useState<{ id: string; channelTitle: string; email?: string; isDefault: boolean }[]>([]);
+  const [removingId, setRemovingId] = useState<string | null>(null);
+
+  const loadAccounts = () => {
+    fetch("/api/youtube/accounts")
+      .then(r => r.json())
+      .then(d => setAccounts(Array.isArray(d.accounts) ? d.accounts : []))
+      .catch(() => setAccounts([]));
+  };
 
   useEffect(() => {
     fetch("/api/youtube/cookies-status")
       .then(r => r.json())
-      .then(d => setCookiesValid(d.valid))
+      .then(d => {
+        setCookiesValid(d.valid);
+        if (d.message) setMessage({ type: d.valid ? "success" : "error", text: d.message });
+      })
       .catch(() => setCookiesValid(false));
+    fetch("/api/youtube/status")
+      .then(r => r.json())
+      .then(d => {
+        setOauthConnected(!!d.authenticated);
+        setOauthConfigured(!!d.oauthConfigured);
+      })
+      .catch(() => { setOauthConnected(false); setOauthConfigured(false); });
+    loadAccounts();
   }, []);
+
+  const handleRemoveAccount = async (id: string) => {
+    setRemovingId(id);
+    try {
+      await fetch(`/api/youtube/accounts/${encodeURIComponent(id)}`, { method: "DELETE" });
+      loadAccounts();
+    } finally {
+      setRemovingId(null);
+    }
+  };
+
+  const handleSetDefault = async (id: string) => {
+    try {
+      await fetch(`/api/youtube/accounts/${encodeURIComponent(id)}/default`, { method: "POST" });
+      loadAccounts();
+    } catch {}
+  };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1443,8 +1844,12 @@ function YoutubeTab() {
         body: text
       });
       const data = await res.json();
-      setCookiesValid(data.valid);
-      setMessage({ type: data.valid ? "success" : "error", text: data.message });
+      if (!res.ok) {
+        setMessage({ type: "error", text: data.error || "Upload failed" });
+      } else {
+        setCookiesValid(data.valid);
+        setMessage({ type: data.valid ? "success" : "error", text: data.message });
+      }
     } catch (err: any) {
       setMessage({ type: "error", text: err.message || "Upload failed" });
     } finally {
@@ -1463,8 +1868,12 @@ function YoutubeTab() {
         body: cookiesText
       });
       const data = await res.json();
-      setCookiesValid(data.valid);
-      setMessage({ type: data.valid ? "success" : "error", text: data.message });
+      if (!res.ok) {
+        setMessage({ type: "error", text: data.error || "Upload failed" });
+      } else {
+        setCookiesValid(data.valid);
+        setMessage({ type: data.valid ? "success" : "error", text: data.message });
+      }
     } catch (err: any) {
       setMessage({ type: "error", text: err.message || "Upload failed" });
     } finally {
@@ -1474,13 +1883,97 @@ function YoutubeTab() {
 
   return (
     <div className="bg-slate-900/40 border border-slate-800 rounded-2xl p-6 sm:p-8 space-y-6">
+      {/* ===== OAuth (recommended) ===== */}
       <div>
-        <h3 className="text-lg font-bold text-white flex items-center gap-2">
+        <h3 className="text-lg font-bold text-ink flex items-center gap-2">
           <Globe className="w-5 h-5 text-indigo-400" />
-          YouTube Upload — Cookies Method
+          YouTube Upload — Official OAuth (Recommended)
         </h3>
         <p className="text-slate-400 text-xs mt-1">
-          No Google Cloud setup needed. Export cookies from YouTube using a browser extension and upload the <strong>cookies.txt</strong> file.
+          Uses the official YouTube Data API with your Google Cloud Client ID &amp; Secret. Most reliable — videos are created properly and you get the link back.
+        </p>
+      </div>
+
+      <div className="flex items-center gap-3 bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-3">
+        <div className={`w-3 h-3 rounded-full ${oauthConnected === null ? "bg-slate-500" : oauthConnected ? "bg-green-500 shadow-[0_0_8px_#22c55e]" : "bg-red-500"}`} />
+        <span className="text-sm text-slate-300">
+          {oauthConnected === null ? "Checking..." : oauthConnected ? "YouTube connected via OAuth ✓" : "YouTube not connected via OAuth"}
+        </span>
+      </div>
+
+      {oauthConfigured === false && (
+        <div className="text-xs px-4 py-3 rounded-lg bg-amber-900/20 text-amber-400 border border-amber-800/50 space-y-1">
+          <p className="font-bold">⚠️ Google Cloud credentials not configured yet.</p>
+          <p>Add <code className="text-amber-300">YOUTUBE_CLIENT_ID</code> and <code className="text-amber-300">YOUTUBE_CLIENT_SECRET</code> to your <code className="text-amber-300">.env</code> file, then restart the server. See the steps below.</p>
+        </div>
+      )}
+
+      {oauthConfigured === true && (
+        <button
+          onClick={() => { window.location.href = "/api/youtube/auth"; }}
+          className="btn btn-primary btn-sm w-full shadow-lg shadow-indigo-600/10"
+        >
+          <Film className="w-4 h-4" />
+          {accounts.length === 0 ? "Connect YouTube Account (OAuth)" : "Add Another Channel"}
+        </button>
+      )}
+
+      {/* Connected channels list */}
+      {accounts.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs font-medium text-slate-400">Connected channels ({accounts.length}):</p>
+          {accounts.map(acc => (
+            <div key={acc.id} className="flex items-center gap-3 bg-slate-950/60 border border-slate-800 rounded-xl px-4 py-3">
+              <div className="w-3 h-3 rounded-full bg-green-500 shadow-[0_0_8px_#22c55e] shrink-0" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm text-slate-200 truncate font-medium">{acc.channelTitle}</p>
+                {acc.email && <p className="text-[11px] text-slate-500 truncate">{acc.email}</p>}
+              </div>
+              {acc.isDefault ? (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-600/30 text-indigo-300 border border-indigo-700/50 shrink-0">Default</span>
+              ) : (
+                <button onClick={() => handleSetDefault(acc.id)} className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-700 shrink-0">
+                  Set default
+                </button>
+              )}
+              <button
+                onClick={() => handleRemoveAccount(acc.id)}
+                disabled={removingId === acc.id}
+                className="text-[10px] px-2 py-0.5 rounded-full bg-red-900/30 text-red-400 hover:text-red-300 border border-red-800/50 shrink-0 disabled:opacity-50"
+              >
+                {removingId === acc.id ? "..." : "Remove"}
+              </button>
+            </div>
+          ))}
+          <p className="text-[11px] text-slate-500">
+            When uploading a video you can pick which channel it goes to. The default channel is used for scheduled uploads.
+          </p>
+        </div>
+      )}
+
+      {oauthConnected && accounts.length === 0 && (
+        <div className="text-xs px-4 py-2 rounded-lg bg-green-900/30 text-green-400 border border-green-800">
+          ✓ Connected. Uploads will use the official YouTube API automatically.
+        </div>
+      )}
+
+      <div className="text-xs text-slate-500 border-t border-slate-800 pt-4 space-y-1">
+        <p className="font-medium text-slate-400">How to set up OAuth (one-time):</p>
+        <p>1. Go to <a href="https://console.cloud.google.com" target="_blank" rel="noreferrer" className="text-indigo-300 underline">console.cloud.google.com</a> → create/select a project</p>
+        <p>2. Enable the <strong>YouTube Data API v3</strong> (APIs &amp; Services → Library)</p>
+        <p>3. Configure the <strong>OAuth consent screen</strong> (External, add your Google email as a test user)</p>
+        <p>4. Create an <strong>OAuth Client ID</strong> (Web application)</p>
+        <p>5. Add this redirect URI: <code className="text-indigo-300 break-all">{typeof window !== "undefined" ? window.location.origin : ""}/api/youtube/callback</code></p>
+        <p>6. Copy the Client ID &amp; Secret into <code className="text-indigo-300">.env</code> as <code className="text-indigo-300">YOUTUBE_CLIENT_ID</code> / <code className="text-indigo-300">YOUTUBE_CLIENT_SECRET</code>, restart, then click Connect above</p>
+      </div>
+
+      <div className="border-t border-slate-800 pt-6">
+        <h4 className="text-sm font-bold text-slate-300 flex items-center gap-2 mb-1">
+          <Globe className="w-4 h-4 text-slate-500" />
+          Fallback — Cookies Method
+        </h4>
+        <p className="text-slate-500 text-xs">
+          Only used if OAuth is not connected. Export cookies from YouTube using a browser extension and upload the <strong>cookies.txt</strong> file.
         </p>
       </div>
 
@@ -1527,19 +2020,54 @@ function YoutubeTab() {
         <button
           onClick={handlePasteSubmit}
           disabled={uploading || !cookiesText.trim()}
-          className="mt-3 w-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 text-white font-bold text-xs px-5 py-2.5 rounded-xl flex items-center justify-center gap-2 cursor-pointer transition-colors shadow-lg shadow-indigo-600/10"
+          className="mt-3 btn btn-primary btn-sm w-full shadow-lg shadow-indigo-600/10"
         >
           <Save className="w-4 h-4" />
           {uploading ? "Saving..." : "Save Cookies"}
         </button>
       </div>
 
+      {/* yt-dlp auto export (Termux-friendly) */}
+      <div className="bg-slate-950/40 border border-slate-800/60 rounded-xl p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-mono font-bold uppercase tracking-wider text-slate-400">
+            🚀 Auto Export via yt-dlp
+          </span>
+          <span className="text-[8px] text-slate-600 font-mono bg-slate-950 px-2 py-0.5 rounded-full">Termux / CLI</span>
+        </div>
+        <p className="text-[10px] text-slate-500 font-mono leading-relaxed">
+          Export cookies directly from your browser using yt-dlp. Gets ALL cookies including Secure ones.
+        </p>
+        <div className="flex gap-2">
+          {["firefox", "chrome", "chromium", "brave", "edge"].map(b => (
+            <button key={b} onClick={async () => {
+              setUploading(true); setMessage(null);
+              try {
+                const res = await fetch("/api/youtube/export-cookies", {
+                  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ browser: b })
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                  setMessage({ type: "error", text: data.error || "Export failed" });
+                } else {
+                  setCookiesValid(data.valid);
+                  setMessage({ type: data.valid ? "success" : "error", text: data.message });
+                }
+              } catch (err: any) { setMessage({ type: "error", text: err.message }); }
+              finally { setUploading(false); }
+            }} disabled={uploading}
+              className="flex-1 py-2 text-[9px] font-bold font-mono rounded-lg border cursor-pointer transition-colors disabled:opacity-40 bg-slate-950 border-slate-800 text-slate-400 hover:text-ink hover:border-indigo-500">
+              {b === "firefox" ? "🦊 " : "🌐 "}{b}
+            </button>
+          ))}
+        </div>
+      </div>
+
       <div className="text-xs text-slate-500 border-t border-slate-800 pt-4 space-y-1">
         <p className="font-medium text-slate-400">How to export cookies:</p>
-        <p>1. Install browser extension like "Get cookies.txt" (Chrome/Firefox)</p>
-        <p>2. Go to youtube.com and make sure you are logged in</p>
-        <p>3. Click the extension and export cookies as Netscape format</p>
-        <p>4. Upload the .txt file above or paste its content</p>
+        <p><strong>Method 1</strong> — yt-dlp: Click a browser button above (requires yt-dlp installed: <code className="text-indigo-300">pip install yt-dlp</code>)</p>
+        <p><strong>Method 2</strong> — Browser extension: Install "Get cookies.txt" (Chrome/Firefox), go to youtube.com logged in, click extension → export → upload file</p>
+        <p><strong>Method 3</strong> — Manual CLI: <code className="text-indigo-300">!yt-dlp --cookies-from-browser firefox --cookies /data/data/com.termux/files/home/shorts2/data/youtube-cookies.txt --skip-download youtube.com</code></p>
       </div>
     </div>
   );

@@ -29,7 +29,7 @@ export default function VideoHistoryView({
   return (
     <div className="space-y-6 text-left">
       <div>
-        <h2 className="text-3xl font-display font-bold text-white">Video History & Exports</h2>
+        <h2 className="text-3xl font-display font-bold text-ink">Video History & Exports</h2>
         <p className="text-slate-400 text-sm mt-1">Review compiled H264 MP4 outputs, review duration metrics, and download rendered files.</p>
       </div>
 
@@ -39,7 +39,7 @@ export default function VideoHistoryView({
             <FileVideo className="w-6 h-6" />
           </div>
           <div className="space-y-1">
-            <h4 className="text-white font-semibold">No finished exports found</h4>
+            <h4 className="text-ink font-semibold">No finished exports found</h4>
             <p className="text-slate-400 text-sm max-w-xs mx-auto">
               Once you trigger video compilation in a project workspace, the final rendered MP4 files will appear here for fast retrieval.
             </p>
@@ -114,20 +114,26 @@ export default function VideoHistoryView({
                         <div className="flex items-center justify-end gap-2.5">
                           <button
                             onClick={() => onSelectProject(project.id)}
-                            className="flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300 font-semibold px-2.5 py-1.5 hover:bg-indigo-600/10 rounded-lg transition-colors cursor-pointer"
+                            className="btn btn-outline btn-sm"
                           >
                             Workspace
                             <ExternalLink className="w-3.5 h-3.5" />
                           </button>
                           
-                          <a
-                            href={project.renderedVideoUrl}
-                            download={`rendered_short_${project.id}.mp4`}
-                            className="text-slate-400 hover:text-emerald-400 p-1.5 hover:bg-slate-800 rounded-lg transition-all cursor-pointer"
-                            title="Download File"
-                          >
-                            <FileDown className="w-4.5 h-4.5" />
-                          </a>
+                          {project.renderedVideoUrl ? (
+                            <a
+                              href={project.renderedVideoUrl}
+                              download={`rendered_short_${project.id}.mp4`}
+                              className="text-slate-400 hover:text-emerald-400 p-1.5 hover:bg-slate-800 rounded-lg transition-all cursor-pointer"
+                              title="Download File"
+                            >
+                              <FileDown className="w-4 h-4" />
+                            </a>
+                          ) : (
+                            <span className="text-slate-600 p-1.5" title="No rendered video available">
+                              <FileDown className="w-4 h-4" />
+                            </span>
+                          )}
 
                           {deleteConfirmId === project.id ? (
                             <div className="flex items-center gap-1 bg-rose-950/40 border border-rose-900/40 p-1 rounded-lg">
@@ -137,13 +143,13 @@ export default function VideoHistoryView({
                                   onDeleteProject(project.id);
                                   setDeleteConfirmId(null);
                                 }}
-                                className="bg-rose-600 hover:bg-rose-500 text-white font-semibold text-[10px] px-2 py-1 rounded cursor-pointer transition-colors"
+                                className="btn btn-danger btn-xs"
                               >
                                 YES
                               </button>
                               <button
                                 onClick={() => setDeleteConfirmId(null)}
-                                className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-[10px] px-2 py-1 rounded cursor-pointer transition-colors"
+                                className="btn btn-secondary btn-xs"
                               >
                                 NO
                               </button>
@@ -151,7 +157,7 @@ export default function VideoHistoryView({
                           ) : (
                             <button
                               onClick={() => setDeleteConfirmId(project.id)}
-                              className="text-slate-500 hover:text-rose-400 p-1.5 hover:bg-slate-800 rounded-lg transition-all cursor-pointer"
+                              className="btn btn-ghost btn-icon btn-xs text-slate-500 hover:text-rose-400"
                               title="Delete File"
                             >
                               <Trash2 className="w-4 h-4" />

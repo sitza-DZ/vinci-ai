@@ -1,0 +1,6 @@
+{
+  "name": "AI Shorts Generator",
+  "description": "Generate viral-style vertical shorts from topics or scripts using Gemini AI and curated footage providers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
