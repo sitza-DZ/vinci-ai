@@ -10,6 +10,10 @@ Includes **Autopilot Mode**: a hands-free factory that keeps generating and uplo
 
 > Runs on **Termux (Android)**, **Windows**, or any Linux box · Protected by **PIN login** · Exposed publicly via **Cloudflare Tunnel**
 
+<p align="center">
+  <img src="assets/screenshot.png" alt="Vinci AI app screenshot" width="100%">
+</p>
+
 ---
 
 ## ✨ Features
@@ -77,7 +81,7 @@ Tunnel:     cloudflared named tunnel
 
 ```bash
 pkg update && pkg upgrade
-pkg install nodejs ffmpeg python git
+pkg install nodejs-lts ffmpeg python git
 pip install edge-tts
 
 # TikTok search needs python3.13 + curl_cffi (optional)
